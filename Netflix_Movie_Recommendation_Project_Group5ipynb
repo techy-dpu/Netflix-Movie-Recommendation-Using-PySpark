@@ -1,0 +1,3062 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 61,
+   "id": "cb25b5e8",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from pyspark.sql.functions import col, explode\n",
+    "from pyspark import SparkContext\n",
+    "from pyspark.sql import SparkSession\n",
+    "import matplotlib.pyplot as plt"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "4cb84084",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "\n",
+    "#location of data files\n",
+    "dbfs_dir = 's3://netflix.movie.ratings/'\n",
+    "movieTitles_filename = dbfs_dir + 'movie_titles.txt'\n",
+    "trainingRatings_filename = dbfs_dir + 'TrainingRatings.txt'\n",
+    "testingRatings_filename = dbfs_dir + 'TestingRatings.txt'"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "28a8b9f9",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#define the schemas\n",
+    "\n",
+    "from pyspark.sql.types import *\n",
+    "\n",
+    "movieTitles_df_schema = StructType(\n",
+    "  [StructField('MovieID', IntegerType()),\n",
+    "   StructField('YearOfRelease', DateType()),\n",
+    "   StructField('Title', StringType())]\n",
+    ")\n",
+    "\n",
+    "trainingRatings_df_schema = StructType(\n",
+    "  [StructField('MovieID', IntegerType()),\n",
+    "   StructField('UserID', IntegerType()),\n",
+    "   StructField('Rating', DoubleType())]\n",
+    ")\n",
+    "\n",
+    "testingRatings_df_schema = StructType(\n",
+    "  [StructField('MovieID', IntegerType()),\n",
+    "   StructField('UserID', IntegerType()),\n",
+    "   StructField('Rating', DoubleType())]\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 78,
+   "id": "1a4711e4",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "22/05/03 10:41:36 WARN CacheManager: Asked to cache already cached data.\n",
+      "22/05/03 10:41:36 WARN CacheManager: Asked to cache already cached data.\n",
+      "22/05/03 10:41:36 WARN CacheManager: Asked to cache already cached data.\n",
+      "22/05/03 10:41:36 WARN CacheManager: Asked to cache already cached data.\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "There are 17769 movies and 3255351 Training_ratings and 100477 Testing_ratings in the datasets\n",
+      "Movies list\n",
+      "+-------+----------------------------+\n",
+      "|MovieID|Title                       |\n",
+      "+-------+----------------------------+\n",
+      "|2      |Isle of Man TT 2004 Review  |\n",
+      "|3      |Character                   |\n",
+      "|4      |Paula Abdul's Get Up & Dance|\n",
+      "+-------+----------------------------+\n",
+      "only showing top 3 rows\n",
+      "\n",
+      "Training_Ratings list\n",
+      "+-------+-------+------+\n",
+      "|MovieID|UserID |Rating|\n",
+      "+-------+-------+------+\n",
+      "|8      |1395430|2.0   |\n",
+      "|8      |1205593|4.0   |\n",
+      "|8      |1488844|4.0   |\n",
+      "+-------+-------+------+\n",
+      "only showing top 3 rows\n",
+      "\n",
+      "Testing_Ratings list\n",
+      "+-------+-------+------+\n",
+      "|MovieID|UserID |Rating|\n",
+      "+-------+-------+------+\n",
+      "|8      |2149668|3.0   |\n",
+      "|8      |1089184|3.0   |\n",
+      "|8      |2465894|3.0   |\n",
+      "+-------+-------+------+\n",
+      "only showing top 3 rows\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "from pyspark.sql.functions import regexp_extract\n",
+    "from pyspark.sql.types import *\n",
+    "\n",
+    "raw_movieTitles_df = sqlContext.read.format('csv').options(header=True, inferSchema=False).schema(movieTitles_df_schema).load(movieTitles_filename)\n",
+    "movieTitles_df = raw_movieTitles_df.drop('YearOfRelease')\n",
+    "\n",
+    "trainingRatings_df = sqlContext.read.format('csv').options(header=True, inferSchema=False).schema(trainingRatings_df_schema).load(trainingRatings_filename)\n",
+    "\n",
+    "testingRatings_df = sqlContext.read.format('csv').options(header=True, inferSchema=False).schema(testingRatings_df_schema).load(testingRatings_filename)\n",
+    "\n",
+    "raw_movieTitles_df.cache()\n",
+    "movieTitles_df.cache()\n",
+    "trainingRatings_df.cache()\n",
+    "testingRatings_df.cache()\n",
+    "\n",
+    "movies_count = movieTitles_df.count()\n",
+    "trainingRatings_count = trainingRatings_df.count()\n",
+    "testingRatings_count = testingRatings_df.count()\n",
+    "\n",
+    "assert raw_movieTitles_df.is_cached\n",
+    "assert movieTitles_df.is_cached\n",
+    "assert trainingRatings_df.is_cached\n",
+    "assert testingRatings_df.is_cached\n",
+    "\n",
+    "print ('There are %s movies and %s Training_ratings and %s Testing_ratings in the datasets' % (movies_count, trainingRatings_count, testingRatings_count))\n",
+    "\n",
+    "print ('Movies list')\n",
+    "movieTitles_df.show(3, truncate=False)\n",
+    "\n",
+    "print ('Training_Ratings list')\n",
+    "trainingRatings_df.show(3, truncate=False)\n",
+    "\n",
+    "print ('Testing_Ratings list')\n",
+    "testingRatings_df.show(3, truncate=False)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 69,
+   "id": "df805729",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "train_all_df = trainingRatings_df.join(movieTitles_df, on='MovieID')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 58,
+   "id": "c31333ae",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "There are 17769 distinct_movies in Movie Titles dataset: \n",
+      "There are 1821 distinct_movies and 28978 distinct_Users and 5 distinct_Ratings in the Training dataset\n",
+      "There are 1701 distinct_movies and 27555 distinct_Users and 5 distinct_Ratings in the Testing dataset\n"
+     ]
+    }
+   ],
+   "source": [
+    "# getting the  unique count\n",
+    "unique_movies_count = movieTitles_df.select(\"MovieID\").distinct().count()\n",
+    "print(\"There are %s distinct_movies in Movie Titles dataset: \"% (unique_movies_count))\n",
+    "\n",
+    "train_unique_movies_count = trainingRatings_df.select(\"MovieID\").distinct().count()\n",
+    "train_unique_user_count = trainingRatings_df.select(\"UserID\").distinct().count()\n",
+    "train_unique_rating_count = trainingRatings_df.select(\"Rating\").distinct().count()\n",
+    "print ('There are %s distinct_movies and %s distinct_Users and %s distinct_Ratings in the Training dataset' % (train_unique_movies_count, train_unique_user_count, train_unique_rating_count))\n",
+    "\n",
+    "test_unique_movies_count = testingRatings_df.select(\"MovieID\").distinct().count()\n",
+    "test_unique_user_count = testingRatings_df.select(\"UserID\").distinct().count()\n",
+    "test_unique_rating_count = testingRatings_df.select(\"Rating\").distinct().count()\n",
+    "print ('There are %s distinct_movies and %s distinct_Users and %s distinct_Ratings in the Testing dataset' % (test_unique_movies_count, test_unique_user_count, test_unique_rating_count))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "49e510fb",
+   "metadata": {},
+   "source": [
+    "# Data Analysis"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 59,
+   "id": "12527cb7",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Converting to pandas DF\n",
+    "pandas_train_df = trainingRatings_df.toPandas()\n",
+    "pandas_test_df = testingRatings_df.toPandas()\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 100,
+   "id": "3d781a23",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "pandas_movies_df = movieTitles_df.toPandas()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 63,
+   "id": "bb02b758",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "image/png": "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6gYxRbO7v5tReDs1SWrk58arP5zR6F2qar+MpmzeMoMyAQAApmqHDHhVdXGSa5L8TFWtqqqXJPn1JC+pqv+d5IYkp4y7fzTJmqq6McnVSV7T3WtmUTcAAMA07ZC3SQAAAODH7ZAjeAAAAPw4AQ8AAGAgdriraO633369dOnSWZcBAAAwE9ddd923unv/Da3b4QLe0qVLs3z58lmXAQAAMBNV9bWNrTNFEwAAYCAEPAAAgIEQ8AAAAAZihzsHDwAAGK777rsvq1atyg9+8INZlzJzu+++e5YsWZJdd9113s8R8AAAgAVj1apV2WuvvbJ06dJU1azLmZnuzpo1a7Jq1aoccsgh836eKZoAAMCC8YMf/CD77rvvog53SVJV2Xfffbd4JFPAAwAAFpTFHu7W25r9IOABAABM2HnnnXPkkUfmiU98Yp797Gfnzjvv3GT/FStW5Kqrrnpg+Yorrsib3/zmKVe5Yc7BAwAAFqzzL1u5Tbf3qlMfv9k+e+yxR1asWJEkOeOMM3LBBRfk9a9//Ub7r1ixIsuXL89JJ52UJDn55JNz8sknb5N6t5QRPAAAgI045phjcvvttydJPve5z+WYY47JUUcdlac+9am5+eabs3bt2px77rm55JJLcuSRR+aSSy7JRRddlLPPPjtJcuaZZ+YVr3hFnvrUp+Zxj3tcLr/88iTJ/fffn5e97GU57LDDcvzxx+ekk056YN1DIeABAABswA9/+MP83d/93QOjcYcddlg++clP5vrrr895552X3/md38luu+2W8847L6eddlpWrFiR00477ce28/Wvfz2f+tSncuWVV+acc85Jknzwgx/MrbfemhtvvDHvfe97c80112yTmk3RBGDB2NbTcBaz+UxBAmDD7r333hx55JG5/fbbc/jhh+f4449Pktx1110544wz8pWvfCVVlfvuu29e23vOc56TnXbaKUcccUTuuOOOJMmnPvWpnHrqqdlpp51ywAEH5LjjjtsmtQt4AACb4Y8P25Y/QLDQrT8H75577skzn/nMXHDBBXnFK16RN7zhDTnuuOPyoQ99KLfeemuOPfbYeW3vYQ972AOPu3tKVY+YogkAALABD3/4w/P2t789b33rW7Nu3brcddddOfDAA5MkF1100QP99tprr3zve9/bom0/7WlPywc+8IHcf//9ueOOO/Lxj398m9Qs4AEA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\n",
+      "text/plain": [
+       "<Figure size 1080x360 with 1 Axes>"
+      ]
+     },
+     "metadata": {
+      "needs_background": "light"
+     },
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "(pd.DataFrame(pandas_train_df['Rating']\n",
+    "              .value_counts(sort=False))\n",
+    "              .sort_index()\n",
+    "              .plot(kind='bar', color='#4472C4', figsize=(15,5), alpha=0.6))\n",
+    "plt.title('Rating Distribution of Training data\\n')\n",
+    "plt.xlabel('Rating')\n",
+    "plt.ylabel('Count')\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 64,
+   "id": "792b8ef3",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "image/png": "iVBORw0KGgoAAAANSUhEUgAAA4cAAAFiCAYAAABF+62OAAAAOXRFWHRTb2Z0d2FyZQBNYXRwbG90bGliIHZlcnNpb24zLjUuMiwgaHR0cHM6Ly9tYXRwbG90bGliLm9yZy8qNh9FAAAACXBIWXMAAAsTAAALEwEAmpwYAAAmMklEQVR4nO3de5hddX3v8feHAIKCgJACJmhQOIVINdgYAT2taFFAuVhFoBeih5b2CFVPPVrQoyhCiz21Kha1tOQBrJWbWAONpRxELZZbkFS5SIkIJRFCDISLIBD4nj/2b3AzziQzZPbsycz79Tz7mbW/a63f+u7JCpMP67fWpKqQJEmSJE1tG/W7AUmSJElS/xkOJUmSJEmGQ0mSJEmS4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSNIaSfDHJR/p4/JuSvG6MxvrdJP/a9b6S7DIWY7fxHk7ykrEab4TH3DzJxUkeSHLBeB57JJJ8LMk/9LsPSZqqDIeSNIUluSPJoy2o3JPkrCRbjHDfdya5srtWVX9cVZ/oQZ+zWjh7uL1WJLkkyX6Djv+yqvrWCMfaeG3bVdWXq+qNY9A+Sb6V5A8Gjb9FVd0+FuOPwtuB7YFtq+qw7hUt2A98fx9P8kTX+2+M9kBDnR9jqZ2rJ/dqfEmaigyHkqSDqmoLYA6wJ3BCf9tZq61br68ALgO+luSdY32QdQXHDdiLgf+sqjWDV7Rgv0X7/v45cN7A+6o6YNw7lSSNO8OhJAmAqroHuJROSAQgyfFJfpTkoSQ3J3lrq+8OfBHYu11ZWt3qT1/NSfK6JMuSvD/JvUnuTvKurrG3bVMcH0xyXZKTR3qlqaruqarPAh8DPplkozbmHUl+qy3PS7K4jb8iyV+33b/Tvq5uve/drnJ9N8mnk6wCPjbMla8Dk9ye5KdJ/m/XcZ8xHbL76mSSU4D/DvxNO97ftG2enqaaZKsk5yRZmeTOJP+na+x3JrkyyV8luT/Jj5MMG9aS7N6uVK5u02wPbvWPAx8FDm99HD2S73Xbd68k/97G/I/uqbutv9vbOfLjdKbjDnl+DDHuzkm+3fa9DNhu0PoL2hXtB5J8J8nLWv0Y4HeBD7bxL271Ic9XSdLIGA4lSQAkmQkcACztKv+ITrDZCvg48A9JdqyqW4A/Bq5qV5a2HmbYHdq+M4CjgdOTbNPWnQ78rG0zv71G6yLgV4BfHWLdZ4HPVtXzgZcC57f6b7SvW7fer2rvXw3cTmfa5SnDHO+twFzglcAhwP9YV4NV9WHg34Dj2vGOG2Kzz9H5Pr0E+E3gKOBdXetfDdxKJzz9JXBmkgweJMkmwMXAv9L5vvwJ8OUkv1pVJ/LMK4Jnrqv3NuYM4J+Bk4EXAP8b+GqS6UmeB5wGHFBVWwL7AEtGcX78I3B9+1yf4JfPgW8Au7bP8j3gywBVdUZb/ss2/kFt+yHP15F8TkmS4VCSBP+U5CHgLuBe4MSBFVV1QVX9pKqeqqrzgNuAeaMY+wngpKp6oqoWAQ8Dv5pkGvA24MSqeqSqbgbOfha9/6R9fcEwx94lyXZV9XBVXb2usarqc1W1pqoeHWabT1bVfVX1X8BngCOfRc/P0L4XRwAnVNVDVXUH8Cng97s2u7Oq/q6qnqTzfdqRTogdbC9gC+DUqnq8qr4JXLKeff4esKiqFrXz4DJgMXBgW/8UsEeSzavq7qq6aSSDJnkR8CrgI1X1WFV9h06wfVpVLWjfk8foXCV+RZKthhtzDM5XSZrSDIeSpEPbVZ/XAbvRNbUvyVFJlrTphKuBPRg09W8dVg26v+0ROuFlOrAxnUA6oHt5pGa0r/cNse5o4L8BP2zTVt+yjrFGcvzube4EXjiCfdZlO2CTNl732DO63t8zsFBVj7TFoR4c9ELgrqp6ai1jjdaLgcMGzoF2HrwW2LGqfgYcTucq4d1J/jnJbiMc94XA/W2M7l6BTmhOcmqbJvogcEdbNez5NwbnqyRNaYZDSRIAVfVt4CzgrwCSvBj4O+A4Ok+33Bq4ERiYzljrcbiVwBpgZldtp2cxzlvpXO28dfCKqrqtqo6kMyXxk8CFbRrkcH2P5PN09/gifnHl8mfAc7vW7TCKsX9K5yrniweNvXwE/Qz2E2CngfsV13OsAXcBX6qqrbtez6uqUwGq6tKq2o/O1cwf0jlnYN3fz7uBbdqfSXevA36HztTd36IzTXRWqw95/o3gfJUkrYPhUJLU7TPAfkleAQwEqZUA6TxMZo+ubVcAM5NsOtqDtOmRF9F58Mtz29Wmo0a6f5LtkxxHZwrsCYOulA1s83tJprd1q1v5qfZ5nqJzf99ofSDJNkl2At4LnNfqS4DfSPKiNu1x8BNfVwx3vPa9OB84JcmWLeT8KfBsft/fNXSuzn4wySbtwTEHAec+i7EG/ANwUJI3tat5m6XzsKGZ7c/hkBbwHqMzbXjgz2Kt50dV3UlneurHk2ya5LWt1wFbtjFX0Qnefz5oiMHf03Wdr5KkdTAcSpKeVlUrgXOAj7b7AD8FXEXnH+K/Bny3a/NvAjcB9yT56bM43HF0rgjdA3wJ+AqdMLA2q5P8DPgBnXveDquqBcNsuz9wU5KH6Tyc5oiqerRNyzwF+G6bfrjXKHr+Op0HqCyh85CWMwHafXjnAd9v6y8ZtN9ngbe3p42eNsS4f0Ln6uPtwJV0HtQy3OcaVlU9TidgHUDniuTngaOq6oejHatrzLvoXMH7EJ3gdRfwATr/htiITpD9CZ2pvb8J/M+260jOj9+h87Cd++gE/XO61p1DZ5rpcuBmYPA9o2cCs9uf4T+N4HyVJK1DqtZnVpAkSWMjySeBHarq2Ty1VJIkrSevHEqS+iLJbkleno55dB4g87V+9yVJ0lS1cb8bkCRNWVvSmUr6QjrTAD9FZ9qmJEnqA6eVSpIkSZKcVipJkiRJMhxKkiRJkjAcSpIkSZIwHEqSJEmSMBxKkiRJkjAcSpIkSZIwHEqSJEmSMBxKkiRJkjAcSpIkSZIwHEqSJEmSMBxKkiRJkjAcSpIkSZIwHEqSJEmSMBxKkiRJkjAcSpIkSZIwHEqSJEmSMBxKkiRJkoCN+93AeNtuu+1q1qxZ/W5DkiRJkvri+uuv/2lVTR9cn3LhcNasWSxevLjfbUiSJElSXyS5c6i600olSZIkSYZDSZIkSZLhUJIkSZLEFLznUJIkSdLk9MQTT7Bs2TJ+/vOf97uVCWGzzTZj5syZbLLJJiPa3nAoSZIkaVJYtmwZW265JbNmzSJJv9vpq6pi1apVLFu2jJ133nlE+zitVJIkSdKk8POf/5xtt912ygdDgCRsu+22o7qKajiUJEmSNGkYDH9htN8Lw6EkSZIkjZFp06YxZ84c9thjDw466CBWr1691u2XLFnCokWLnn6/cOFCTj311B53OTTvOZQkSZI0KX3mgqVjOt77DttlndtsvvnmLFmyBID58+dz+umn8+EPf3jY7ZcsWcLixYs58MADATj44IM5+OCDx6Tf0fLKoSRJkiT1wN57783y5csBuPbaa9l7773Zc8892Weffbj11lt5/PHH+ehHP8p5553HnDlzOO+88zjrrLM47rjjAHjnO9/Je97zHvbZZx9e8pKXcOGFFwLw1FNP8e53v5vddtuN/fbbjwMPPPDpdevDcChJkiRJY+zJJ5/k8ssvf/oq4G677ca//du/ccMNN3DSSSfxoQ99iE033ZSTTjqJww8/nCVLlnD44Yf/0jh33303V155JZdccgnHH388ABdddBF33HEHN998M1/60pe46qqrxqRnp5VKkiaFsZ46NNWNZOqUJOmXPfroo8yZM4fly5ez++67s99++wHwwAMPMH/+fG677TaS8MQTT4xovEMPPZSNNtqI2bNns2LFCgCuvPJKDjvsMDbaaCN22GEH9t133zHp3SuHkiRJkjRGBu45vPPOO6kqTj/9dAA+8pGPsO+++3LjjTdy8cUXj/hXTDznOc95ermqetLzAMOhJEmSJI2x5z73uZx22ml86lOfYs2aNTzwwAPMmDEDgLPOOuvp7bbcckseeuihUY39mte8hq9+9as89dRTrFixgm9961tj0rPTSiVJknrMac9jxynP2pDsueeevPzlL+crX/kKH/zgB5k/fz4nn3wyb37zm5/eZt999+XUU09lzpw5nHDCCSMa921vexuXX345s2fPZqedduKVr3wlW2211Xr3m15fmpxo5s6dW4sXL+53G5KkMeY/vseW/wAfW56fY8dzU2tzyy23sPvuu/e7jXHx8MMPs8UWW7Bq1SrmzZvHd7/7XXbYYYdf2m6o70mS66tq7uBtvXIoSZIkSRuYt7zlLaxevZrHH3+cj3zkI0MGw9EyHEqSJEnSBmas7jPs5gNpJEmSJEmGQ0mSJEmTx1R7psrajPZ7YTiUJEmSNClsttlmrFq1yoBIJxiuWrWKzTbbbMT7eM+hJEmSpElh5syZLFu2jJUrV/a7lQlhs802Y+bMmSPe3nAoSZIkaVLYZJNN2HnnnfvdxgbLaaWSJEmSJMOhJEmSJMlwKEmSJEnCcChJkiRJoofhMMlmSa5N8h9Jbkry8VbfOck1SZYmOS/Jpq3+nPZ+aVs/q2usE1r91iRv6qrv32pLkxzfq88iSZIkSZNdL68cPga8vqpeAcwB9k+yF/BJ4NNVtQtwP3B02/5o4P5W/3TbjiSzgSOAlwH7A59PMi3JNOB04ABgNnBk21aSJEmSNEo9C4fV8XB7u0l7FfB64MJWPxs4tC0f0t7T1r8hSVr93Kp6rKp+DCwF5rXX0qq6vaoeB85t20qSJEmSRqmn9xy2K3xLgHuBy4AfAaurak3bZBkwoy3PAO4CaOsfALbtrg/aZ7i6JEmSJGmUehoOq+rJqpoDzKRzpW+3Xh5vOEmOSbI4yeKVK1f2owVJkiRJmtDG5WmlVbUauALYG9g6ycZt1UxgeVteDuwE0NZvBazqrg/aZ7j6UMc/o6rmVtXc6dOnj8VHkiRJkqRJpZdPK52eZOu2vDmwH3ALnZD49rbZfODrbXlhe09b/82qqlY/oj3NdGdgV+Ba4Dpg1/b0003pPLRmYa8+jyRJkiRNZhuve5NnbUfg7PZU0Y2A86vqkiQ3A+cmORm4ATizbX8m8KUkS4H76IQ9quqmJOcDNwNrgGOr6kmAJMcBlwLTgAVVdVMPP48kSZIkTVo9C4dV9X1gzyHqt9O5/3Bw/efAYcOMdQpwyhD1RcCi9W5WkiRJkqa4cbnnUJIkSZI0sRkOJUmSJEmGQ0mSJEmS4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmSRA/DYZKdklyR5OYkNyV5b6t/LMnyJEva68CufU5IsjTJrUne1FXfv9WWJjm+q75zkmta/bwkm/bq80iSJEnSZNbLK4drgPdX1WxgL+DYJLPbuk9X1Zz2WgTQ1h0BvAzYH/h8kmlJpgGnAwcAs4Eju8b5ZBtrF+B+4Ogefh5JkiRJmrR6Fg6r6u6q+l5bfgi4BZixll0OAc6tqseq6sfAUmBeey2tqtur6nHgXOCQJAFeD1zY9j8bOLQnH0aSJEmSJrlxuecwySxgT+CaVjouyfeTLEiyTavNAO7q2m1Zqw1X3xZYXVVrBtUlSZIkSaPU83CYZAvgq8D7qupB4AvAS4E5wN3Ap8ahh2OSLE6yeOXKlb0+nCRJkiRtcHoaDpNsQicYfrmqLgKoqhVV9WRVPQX8HZ1powDLgZ26dp/ZasPVVwFbJ9l4UP2XVNUZVTW3quZOnz59bD6cJEmSJE0ivXxaaYAzgVuq6q+76jt2bfZW4Ma2vBA4IslzkuwM7ApcC1wH7NqeTLopnYfWLKyqAq4A3t72nw98vVefR5IkSZIms43Xvcmz9hrg94EfJFnSah+i87TROUABdwB/BFBVNyU5H7iZzpNOj62qJwGSHAdcCkwDFlTVTW28PwPOTXIycAOdMCpJkiRJGqWehcOquhLIEKsWrWWfU4BThqgvGmq/qrqdX0xLlSRJkiQ9S+PytFJJkiRJ0sRmOJQkSZIkGQ4lSZIkSYZDSZIkSRKGQ0mSJEkShkNJkiRJEoZDSZIkSRKGQ0mSJEkShkNJkiRJEoZDSZIkSRKGQ0mSJEkShkNJkiRJEoZDSZIkSRKGQ0mSJEkShkNJkiRJEoZDSZIkSRKGQ0mSJEkShkNJkiRJEoZDSZIkSRKGQ0mSJEkShkNJkiRJEoZDSZIkSRKGQ0mSJEkShkNJkiRJEoZDSZIkSRKGQ0mSJEkShkNJkiRJEoZDSZIkSRKGQ0mSJEkShkNJkiRJEoZDSZIkSRI9DIdJdkpyRZKbk9yU5L2t/oIklyW5rX3dptWT5LQkS5N8P8kru8aa37a/Lcn8rvqvJ/lB2+e0JOnV55EkSZKkyayXVw7XAO+vqtnAXsCxSWYDxwOXV9WuwOXtPcABwK7tdQzwBeiESeBE4NXAPODEgUDZtvnDrv327+HnkSRJkqRJq2fhsKrurqrvteWHgFuAGcAhwNlts7OBQ9vyIcA51XE1sHWSHYE3AZdV1X1VdT9wGbB/W/f8qrq6qgo4p2ssSZIkSdIojMs9h0lmAXsC1wDbV9XdbdU9wPZteQZwV9duy1ptbfVlQ9SHOv4xSRYnWbxy5cr1+zCSJEmSNAn1PBwm2QL4KvC+qnqwe1274le97qGqzqiquVU1d/r06b0+nCRJkiRtcHoaDpNsQicYfrmqLmrlFW1KKO3rva2+HNipa/eZrba2+swh6pIkSZKkUerl00oDnAncUlV/3bVqITDwxNH5wNe76ke1p5buBTzQpp9eCrwxyTbtQTRvBC5t6x5Mslc71lFdY0mSJEmSRmHjHo79GuD3gR8kWdJqHwJOBc5PcjRwJ/COtm4RcCCwFHgEeBdAVd2X5BPAdW27k6rqvrb8buAsYHPgG+0lSZIkSRqlnoXDqroSGO73Dr5hiO0LOHaYsRYAC4aoLwb2WI82JUmSJEmM09NKJUmSJEkTWy+nlUqSJEmawD5zwdJ+tzCpvO+wXfrdwnrxyqEkSZIkyXAoSZIkSTIcSpIkSZIYYThM8pqR1CRJkiRJG6aRXjn83AhrkiRJkqQN0FqfVppkb2AfYHqSP+1a9XxgWi8bkyRJkiSNn3X9KotNgS3adlt21R8E3t6rpiRJkiRJ42ut4bCqvg18O8lZVXXnOPUkSZIkSRpn67pyOOA5Sc4AZnXvU1Wv70VTkiRJkqTxNdJweAHwReDvgSd7144kSZIkqR9GGg7XVNUXetqJJEmSJKlvRvqrLC5O8u4kOyZ5wcCrp51JkiRJksbNSK8czm9fP9BVK+AlY9uOJEmSJKkfRhQOq2rnXjciSZIkSeqfEYXDJEcNVa+qc8a2HUmSJElSP4x0WumrupY3A94AfA8wHEqSJEnSJDDSaaV/0v0+ydbAub1oSJIkSZI0/kb6tNLBfgZ4H6IkSZIkTRIjvefwYjpPJwWYBuwOnN+rpiRJkiRJ42uk9xz+VdfyGuDOqlrWg34kSZIkSX0wommlVfVt4IfAlsA2wOO9bEqSJEmSNL5GFA6TvAO4FjgMeAdwTZK397IxSZIkSdL4Gem00g8Dr6qqewGSTAf+H3BhrxqTJEmSJI2fkT6tdKOBYNisGsW+kiRJkqQJbqRXDv8lyaXAV9r7w4FFvWlJkiRJkjTe1hoOk+wCbF9VH0jy28Br26qrgC/3ujlJkiRJ0vhY15XDzwAnAFTVRcBFAEl+ra07qIe9SZIkSZLGybruG9y+qn4wuNhqs3rSkSRJkiRp3K0rHG69lnWbr23HJAuS3Jvkxq7ax5IsT7KkvQ7sWndCkqVJbk3ypq76/q22NMnxXfWdk1zT6ucl2XQdn0WSJEmSNIx1hcPFSf5wcDHJHwDXr2Pfs4D9h6h/uqrmtNeiNt5s4AjgZW2fzyeZlmQacDpwADAbOLJtC/DJNtYuwP3A0evoR5IkSZI0jHXdc/g+4GtJfpdfhMG5wKbAW9e2Y1V9J8msEfZxCHBuVT0G/DjJUmBeW7e0qm4HSHIucEiSW4DXA7/Ttjkb+BjwhREeT5IkSZLUZa3hsKpWAPsk2RfYo5X/uaq+uR7HPC7JUcBi4P1VdT8wA7i6a5tlrQZw16D6q4FtgdVVtWaI7SVJkiRJozSiX2RfVVdU1efaa32C4ReAlwJzgLuBT63HWCOW5Jgki5MsXrly5XgcUpIkSZI2KCMKh2OlqlZU1ZNV9RTwd/xi6uhyYKeuTWe22nD1VcDWSTYeVB/uuGdU1dyqmjt9+vSx+TCSJEmSNImMazhMsmPX27cCA08yXQgckeQ5SXYGdgWuBa4Ddm1PJt2UzkNrFlZVAVcAb2/7zwe+Ph6fQZIkSZImo3U9kOZZS/IV4HXAdkmWAScCr0syByjgDuCPAKrqpiTnAzcDa4Bjq+rJNs5xwKXANGBBVd3UDvFnwLlJTgZuAM7s1WeRJEmSpMmuZ+Gwqo4cojxsgKuqU4BThqgvAhYNUb+dX0xLlSRJkiSth3GdVipJkiRJmpgMh5IkSZIkw6EkSZIkyXAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJAjbudwOSNiyfuWBpv1uYVN532C79bkGSJAnwyqEkSZIkCcOhJEmSJAnDoSRJkiQJw6EkSZIkCcOhJEmSJAnDoSRJkiSJHobDJAuS3Jvkxq7aC5JcluS29nWbVk+S05IsTfL9JK/s2md+2/62JPO76r+e5Adtn9OSpFefRZIkSZImu15eOTwL2H9Q7Xjg8qraFbi8vQc4ANi1vY4BvgCdMAmcCLwamAecOBAo2zZ/2LXf4GNJkiRJkkaoZ+Gwqr4D3DeofAhwdls+Gzi0q35OdVwNbJ1kR+BNwGVVdV9V3Q9cBuzf1j2/qq6uqgLO6RpLkiRJkjRK433P4fZVdXdbvgfYvi3PAO7q2m5Zq62tvmyIuiRJkiTpWejbA2naFb8aj2MlOSbJ4iSLV65cOR6HlCRJkqQNyniHwxVtSijt672tvhzYqWu7ma22tvrMIepDqqozqmpuVc2dPn36en8ISZIkSZpsxjscLgQGnjg6H/h6V/2o9tTSvYAH2vTTS4E3JtmmPYjmjcClbd2DSfZqTyk9qmssSZIkSdIobdyrgZN8BXgdsF2SZXSeOnoqcH6So4E7gXe0zRcBBwJLgUeAdwFU1X1JPgFc17Y7qaoGHnLzbjpPRN0c+EZ7SZIkSZKehZ6Fw6o6cphVbxhi2wKOHWacBcCCIeqLgT3Wp0dJkiRJUkffHkgjSZIkSZo4DIeSJEmSJMOhJEmSJMlwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEnCcChJkiRJwnAoSZIkScJwKEmSJEmiT+EwyR1JfpBkSZLFrfaCJJclua193abVk+S0JEuTfD/JK7vGmd+2vy3J/H58FkmSJEmaDDbu47H3raqfdr0/Hri8qk5Ncnx7/2fAAcCu7fVq4AvAq5O8ADgRmAsUcH2ShVV1/3h+iF75zAVL+93CpPG+w3bpdwuSJEnShDeRppUeApzdls8GDu2qn1MdVwNbJ9kReBNwWVXd1wLhZcD+49yzJEmSJE0K/QqHBfxrkuuTHNNq21fV3W35HmD7tjwDuKtr32WtNlxdkiRJkjRK/ZpW+tqqWp7kV4DLkvywe2VVVZIaq4O1AHoMwIte9KKxGlaSJEmSJo2+XDmsquXt673A14B5wIo2XZT29d62+XJgp67dZ7bacPWhjndGVc2tqrnTp08fy48iSZIkSZPCuIfDJM9LsuXAMvBG4EZgITDwxNH5wNfb8kLgqPbU0r2AB9r000uBNybZpj3Z9I2tJkmSJEkapX5MK90e+FqSgeP/Y1X9S5LrgPOTHA3cCbyjbb8IOBBYCjwCvAugqu5L8gngurbdSVV13/h9DEmSJEmaPMY9HFbV7cArhqivAt4wRL2AY4cZawGwYKx7lCRJkqSpZiL9KgtJkiRJUp8YDiVJkiRJhkNJkiRJkuFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJkoThUJIkSZKE4VCSJEmShOFQkiRJksQkCIdJ9k9ya5KlSY7vdz+SJEmStCHaoMNhkmnA6cABwGzgyCSz+9uVJEmSJG14NuhwCMwDllbV7VX1OHAucEife5IkSZKkDc6GHg5nAHd1vV/WapIkSZKkUdi43w2MhyTHAMe0tw8nubWf/Uwi2wE/7XcT6/K/+t2A+sXzUxOV56Ymsgl/fnpuTlkT/tyEDer8fPFQxQ09HC4Hdup6P7PVnqGqzgDOGK+mpooki6tqbr/7kIbi+amJynNTE5nnpyYqz83xsaFPK70O2DXJzkk2BY4AFva5J0mSJEna4GzQVw6rak2S44BLgWnAgqq6qc9tSZIkSdIGZ4MOhwBVtQhY1O8+piin6moi8/zUROW5qYnM81MTlefmOEhV9bsHSZIkSVKfbej3HEqSJEmSxoDhUJIkSZJkOJQkSZIkTYIH0kjSgCTbAzPa2+VVtaKf/UjdkrwAoKru63cvUjfPTU1U/lwffz6QRqPmX1RNNEnmAF8EtgKWt/JMYDXw7qr6Xn8601SX5EXAXwJvoHM+Bng+8E3g+Kq6o2/NaUrz3NRE5s/1/jEcasT8i6qJKskS4I+q6ppB9b2Av62qV/SlMU15Sa4CPgNcWFVPtto04DDgfVW1Vx/b0xTmuamJzJ/r/WM41Ij5F1UTVZLbqmrXYdYtrapdxrsnCdZ5bg67Tuo1z01NZP5c7x/vOdRoPG9wMASoqquTPK8fDUnNN5L8M3AOcFer7QQcBfxL37qS4PoknwfO5pnn5nzghr51JXluamLz53qfeOVQI5bkNOClDP0X9cdVdVy/epOSHAAcQtf9sMDCqlrUv6401SXZFDiaZ56by4CLgTOr6rF+9aapzXNTE50/1/vDcKhR8S+qJEmSNDkZDiVNakmOqaoz+t2HNFiSt1TVJf3uQxrMc1MTmT/Xe2ujfjegySHJMf3uQRpG+t2ANIxX9bsBaRiem5rI/LneQz6QRmPFv6jqqyS70ZnufE1VPdy16s4+tSQBkGQeUFV1XZLZwP7AD6vqxD63Jj1DknOq6ijPTU00SV4LzANurKq/7Xc/k5nhUGPl8X43oKkryXuAY4FbgDOTvLeqvt5W/zk+2Ux9kuRE4ABg4ySXAa8GrgCOT7JnVZ3S1wY1ZSVZOLgE7Jtka4CqOnjcm5KaJNdW1by2/Id0fsZ/DTgxySur6tS+NjiJec+hxkSS/6qqF/W7D01NSX4A7F1VDyeZBVwIfKmqPpvkhqras78daqpq5+Yc4DnAPcDMqnowyeZ0rnK/vJ/9aepK8j3gZuDvgaITDr8CHAFQVd/uX3ea6rp/die5Djiwqla2X512dVX9Wn87nLy8cqgRS/L94VYB249nL9IgGw1MJa2qO5K8DrgwyYtxyrP6a01VPQk8kuRHVfUgQFU9muSpPvemqW0u8F7gw8AHqmpJkkcNhZogNkqyDZ3no6SqVgJU1c+SrOlva5Ob4VCjsT3wJuD+QfUA/z7+7UhPW5FkTlUtAWhXEN8CLAD8v4vqp8eTPLeqHgF+faCYZCvAcKi+qaqngE8nuaB9XYH/LtTEsRVwPZ1/Y1aSHavq7iRb4P/07Sn/I6DRuATYYuAf4N2SfGvcu5F+4SjgGf8nsarWAEcl8cZ19dNvDPwy8faP8QGbAPP705L0C1W1DDgsyZuBB/vdjwRQVbOGWfUU8NZxbGXK8Z5DSZIkSZK/51CSJEmSZDiUJEmSJGE4lCRp1JI8mWRJkhuTXDzwu+HWsv2cJAd2vT84yfE9b1SSpFHwnkNJkkYpycNVtUVbPhv4z7X9Qvsk7wTmVtVx49SiJEmj5tNKJUlaP1cBLwdIMg/4LLAZ8CjwLuDHwEnA5kleC/wFsDktLCY5i85TIucCOwAfrKoLk2wE/A3weuAu4AlgQVVdOI6fTZI0hTitVJKkZynJNOANwMJW+iHw36tqT+CjwJ9X1eNt+byqmlNV5w0x1I7Aa4G3AKe22m8Ds4DZwO8De/fqc0iSBF45lCTp2dg8yRJgBnALcFmrbwWcnWRXoOj8PsOR+Kf2exBvTrJ9q70WuKDV70lyxZh1L0nSELxyKEnS6D1aVXOAFwMBjm31TwBXVNUewEF0ppeOxGNdyxmrJiVJGg3DoSRJz1JVPQK8B3h/ko3pXDlc3la/s2vTh4AtRzn8d4G3JdmoXU183fp1K0nS2hkOJUlaD1V1A/B94EjgL4G/SHIDz7x14wpgdvv1F4ePcOivAsuAm4F/AL4HPDBmjUuSNIi/ykKSpAkqyRZV9XCSbYFrgddU1T397kuSNDn5QBpJkiauS5JsDWwKfMJgKEnqJa8cSpIkSZK851CSJEmSZDiUJEmSJGE4lCRJkiRhOJQkSZIkYTiUJEmSJGE4lCRJkiQB/x9TYyPh7rDJRgAAAABJRU5ErkJggg==\n",
+      "text/plain": [
+       "<Figure size 1080x360 with 1 Axes>"
+      ]
+     },
+     "metadata": {
+      "needs_background": "light"
+     },
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "(pd.DataFrame(pandas_test_df['Rating']\n",
+    "              .value_counts(sort=False))\n",
+    "              .sort_index()\n",
+    "              .plot(kind='bar', color='#4472C4', figsize=(15,5), alpha=0.6))\n",
+    "plt.title('Rating Distribution of Test data\\n')\n",
+    "plt.xlabel('Rating')\n",
+    "plt.ylabel('Count')\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 107,
+   "id": "e67a6e94",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "image/png": "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\n",
+      "text/plain": [
+       "<Figure size 1080x360 with 1 Axes>"
+      ]
+     },
+     "metadata": {
+      "needs_background": "light"
+     },
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "(pd.DataFrame(pandas_train_df.groupby('UserID')\n",
+    "              .count()['Rating'])\n",
+    "              .plot(kind='hist', color='#4472C4', figsize=(15,5), alpha=0.6))\n",
+    "plt.title('Number of ratings by UserID')\n",
+    "plt.xlabel('Rating')\n",
+    "plt.ylabel('Count')\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 108,
+   "id": "9566b52f",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "image/png": "iVBORw0KGgoAAAANSUhEUgAAA4EAAAFNCAYAAAC+H2oqAAAAOXRFWHRTb2Z0d2FyZQBNYXRwbG90bGliIHZlcnNpb24zLjUuMiwgaHR0cHM6Ly9tYXRwbG90bGliLm9yZy8qNh9FAAAACXBIWXMAAAsTAAALEwEAmpwYAAAmKklEQVR4nO3de7hddX3n8feHhGuhXFPABEwstEKtA0xELrYVqYgMAlVBGJXg0DIdQWtra0FHsdgqdlovtNY+VBCwlouIIyitUgQVR5AgUbmopAiSyCWGi1BBCHznj/0LbA4nyTknZ59Nznq/nmc/Z63f+q3f/u591rNPPvmttXaqCkmSJElSN6w37AIkSZIkSVPHEChJkiRJHWIIlCRJkqQOMQRKkiRJUocYAiVJkiSpQwyBkiRJktQhhkBJ0kAkOSvJXw7puZPkk0nuS/KtAT3HjkkeSjJjEOOv4jlfmmTJVD3f2mrvz/OGXYck6ekMgZLUEUluS3JPkl/qa/v9JFcOsaxBeQnwcmBOVe05GQO29+93V65X1Y+ratOqenwyxp9qLaRXkkNHtH+4tR+zts/R3p9b12aM/vc9yTFJHm/h8qEkP2ph/9fWtlZJ6hJDoCR1ywzgj4ZdxHhNYLbtucBtVfWfYxx/5virmhZ+CBy9cqW9D0cA/zG0itbsm1W1KbA58LvAw8B1SV4w3LIkad1hCJSkbvk/wJ8m2WLkhiRz2wzQzL62K5P8fls+Jsk32kzR/UluTbJPa7+jzTIuGDHsNkkuS/Jgkq8meW7f2M9v2+5N8oMkR/RtOyvJx5NcmuQ/gf1Gqfc5SS5u+y9O8get/VjgE8DebbboL0bZt/+1LAfem+RXk3wlyfIkP03y6ZXvU5JPATsCl7Qx3zHy/Wrv1fvauA8m+XKSbfqe8+gkt7fx3z1ihmvPJAuT/CzJ3Uk+tLpfYpJ3thpvS/L61vaitu+Mvn6vTvKd1Qx1CfCSJFu29QOB7wJ39Y2xXpL/3Wq/J8k5STZv2/41yQkjavtOkle35UqyU1veMMnfJPlxq/Mfk2zctm2T5AvtuLo3ydeTrPbfKFX1eFX9R1W9Gfgq8N7V9ZckPcUQKEndshC4EvjTCe7/YnohYWvgX4DzgBcBOwFvAP4+yaZ9/V8PvA/YBlgEfBogvVNSL2tj/ApwJPAPSXbt2/e/A38FbAZcNUot5wFLgOcArwXen+RlVXUG8Ie0GaOqOnk1r+VWYNv2PAE+0MbbBdiBFiyq6o3Aj4FXtTH/ehVj/nfgTe01bUB7n9vr+of2fmxPbxZrdt9+HwU+WlW/DPwqcMEqxgfYjt77ORtYAJye5Ner6lpgOXBAX983AuesZqxHgM/Te/+hNys4sv8x7bEf8DxgU+Dv27ZzgaNWdmyv87nAF0d5rlOBXwN2o3e8zAbe07a9nd7vcha938c7gVpN3SNdBPzWOPpLUqcZAiWpe94DvCXJrAns+6Oq+mS7Du58ekHplKr6RVV9GXiU3j/wV/piVX2tqn4BvIve7NwOwMH0Ttf8ZFWtqKrrgc8Ch/ft+/mq+kZVPVFVj/QX0cbYF/jzqnqkqhbRm/07mrH7SVX9XXv+h6tqcVVd1l7LMuBDwO+MYzyAT1bVD6vqYXpBbrfW/lrgkqq6qqoepfc76A85jwE7Jdmmqh6qqqvX8DzvbnV+lV7gWjmLeja9ME6SrYBX0Avaq3MOcHSb9fwd4P+O2P564ENVdWtVPQScBBzZZkA/B+zWN8P7euCi9vt+UpIAxwF/XFX3VtWDwPt5Knw+Ri8cP7eqHquqr1fVeELgT4CtxtFfkjrNEChJHVNVNwBfAE6cwO539y0/3MYb2dY/E3hH3/M+BNxLb6btucCL2+l/9ye5n16A2G60fUfxHGBlmFjpdp4+u7YmTxs/ybZJzkuyNMnPgH+mN+M2Hnf1Lf+cp96L5/D09+Ln9GbtVjqW3izZ95Ncm+Tg1TzHfSOudby9jU+r+VVtpvUI4OtVdefqCq6qq+jNwL0L+EILsP2e056j//lmAtu29/+LPBXmjqLN9o4wC9iE3rV7K3/f/9baoXea8mLgy+004/Eem7PpHVuSpDEwBEpSN50M/AFPD00rg8UmfW39oWwidli50E4T3YrerM0dwFeraou+x6ZV9b/69l3dTNBPgK2SbNbXtiOwdBy1jRz//a3tN9tpmW+gd4roWOpZkzuBOStX2rVwWz85cNUtVXUUvdNIPwhcmL67uI6w5YhtO9J7P6iqpcA3gVfTOxX0U2Os75/pnZI52qmjP6EX2vufbwVP/YfAucBRSfYGNgKuGGWMn9L7D4Lf6Pt9b95u8EJVPVhVb6+q5wGHAH+SZP8x1g7we8DXx9FfkjrNEChJHVRVi+mdzvnWvrZl9ELUG5LMSPI/6F2ftjYOSvKSJBvQuzbw6qq6g95M5K8leWOS9dvjRUl2GWP9dwD/D/hAko2SvJDebNo/r0WtmwEPAQ8kmQ382Yjtd9O7Jm4iLqQ3Q7dPey/eS1/ATPKGJLOq6gng/tb8xGrG+4skGyT5LXqn1n6mb9s5wDuA36R3rdxYnEbvKzW+Nsq2c4E/TjKvBfn3A+dX1Yq2/VJ6IfGU1v6MulvbPwEfTvIrAElmJ3lFWz44yU7ttNEHgMdZ/eunHaPzkvwd8FLgGTcAkiSNzhAoSd11CjBytukP6IWf5cBv0Ataa+Nf6M063gv8V9r1au00wgPonUb4E3qnUX4Q2HAcYx8FzG37fw44uar+fS1q/QtgD3oh5Is8M0B9APjf7XTGcd1Yp6puBN5C72Y2d9ILm/cAK6+dOxC4MclD9G4Sc+Qop2WudBdwH73X/WngD6vq+33bP0cvlH2unXY6lvrurarLV3Ed3pn0ZhS/BvyI3s1k3tK37y/ovVe/y+qvP/xzeqd8Xt1Ot/134Nfbtp3b+kP0ZjL/oapGm1GEdtdX4Gf0bnL0y8CLqup7Y3ipkiQg47vuWpIkra02o3Y/sHNV/WgA4/8H8D/XMhRLkqYpZwIlSZoCSV6VZJN2Pd/fAN8DbhvA87yG3vWLX5nssSVJ08PMNXeRJEmT4FB6p1WG3vc1HjnOr0FYoyRXArsCbxzt2jxJksDTQSVJkiSpUzwdVJIkSZI6xBAoSZIkSR0yLa8J3GabbWru3LnDLkOSJEmShuK66677aVXNGm3btAyBc+fOZeHChcMuQ5IkSZKGIsntq9rm6aCSJEmS1CGGQEmSJEnqEEOgJEmSJHXItLwmUJIkSdL09dhjj7FkyRIeeeSRYZcydBtttBFz5sxh/fXXH/M+hkBJkiRJ65QlS5aw2WabMXfuXJIMu5yhqSqWL1/OkiVLmDdv3pj383RQSZIkSeuURx55hK233rrTARAgCVtvvfW4Z0QNgZIkSZLWOV0PgCtN5H0wBEqSJEnSOM2YMYPddtuNF7zgBbzqVa/i/vvvX23/RYsWcemllz65fvHFF3PqqacOuMrReU2gJEmSpHXaRz6zeFLHe9vhO62xz8Ybb8yiRYsAWLBgAR/72Md417vetcr+ixYtYuHChRx00EEAHHLIIRxyyCGTUu94ORMoSZIkSWth7733ZunSpQB861vfYu+992b33Xdnn3324Qc/+AGPPvoo73nPezj//PPZbbfdOP/88znrrLM44YQTADjmmGN461vfyj777MPznvc8LrzwQgCeeOIJ3vzmN/P85z+fl7/85Rx00EFPblsbhkBJkiRJmqDHH3+cyy+//MlZvec///l8/etf5/rrr+eUU07hne98JxtssAGnnHIKr3vd61i0aBGve93rnjHOnXfeyVVXXcUXvvAFTjzxRAAuuugibrvtNm666SY+9alP8c1vfnNSavZ00Ck02dPUXTCWqXhJkiRpqj388MPstttuLF26lF122YWXv/zlADzwwAMsWLCAW265hSQ89thjYxrvsMMOY7311mPXXXfl7rvvBuCqq67i8MMPZ7311mO77bZjv/32m5TanQmUJEmSpHFaeU3g7bffTlXxsY99DIB3v/vd7Lffftxwww1ccsklY/76hg033PDJ5aoaSM0rGQIlSZIkaYI22WQTTjvtNP72b/+WFStW8MADDzB79mwAzjrrrCf7bbbZZjz44IPjGnvffffls5/9LE888QR33303V1555aTUbAiUJEmSpLWw++6788IXvpBzzz2Xd7zjHZx00knsvvvurFix4sk+++23HzfddNOTN4YZi9e85jXMmTOHXXfdlTe84Q3ssccebL755mtdbwY91TgM8+fPr4ULFw67jGfwmsDx85pASZIkjXTzzTezyy67DLuMKfHQQw+x6aabsnz5cvbcc0++8Y1vsN122z2tz2jvR5Lrqmr+aGN6YxhJkiRJepY6+OCDuf/++3n00Ud597vf/YwAOBGGQEmSJEl6lpqs6wD7eU2gJEmSJHWIIVCSJEnSOmc63ttkIibyPhgCJUmSJK1TNtpoI5YvX975IFhVLF++nI022mhc+3lNoCRJkqR1ypw5c1iyZAnLli0bdilDt9FGGzFnzpxx7WMIlCRJkrROWX/99Zk3b96wy1hneTqoJEmSJHWIIVCSJEmSOsQQKEmSJEkdMrAQmOTMJPckuWGUbW9PUkm2aetJclqSxUm+m2SPvr4LktzSHgsGVa8kSZIkdcEgZwLPAg4c2ZhkB+AA4Md9za8Edm6P44CPt75bAScDLwb2BE5OsuUAa5YkSZKkaW1gIbCqvgbcO8qmDwPvAPq/1ONQ4JzquRrYIsn2wCuAy6rq3qq6D7iMUYKlJEmSJGlspvSawCSHAkur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\n",
+      "text/plain": [
+       "<Figure size 1080x360 with 1 Axes>"
+      ]
+     },
+     "metadata": {
+      "needs_background": "light"
+     },
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# Reviews per movie plot\n",
+    "(pd.DataFrame(pandas_train_df.groupby('MovieID')\n",
+    "              .count()['Rating'])\n",
+    "              .plot(kind='hist', color='#4472C4', figsize=(15,5), alpha=0.6))\n",
+    "plt.title('Number of ratings by MoviesID')\n",
+    "plt.xlabel('Rating')\n",
+    "plt.ylabel('Count')\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 65,
+   "id": "0a50fc25",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>Rating</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>count</th>\n",
+       "      <td>3.255351e+06</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>mean</th>\n",
+       "      <td>3.481188e+00</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>std</th>\n",
+       "      <td>1.082873e+00</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>min</th>\n",
+       "      <td>1.000000e+00</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>25%</th>\n",
+       "      <td>3.000000e+00</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>50%</th>\n",
+       "      <td>4.000000e+00</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>75%</th>\n",
+       "      <td>4.000000e+00</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>max</th>\n",
+       "      <td>5.000000e+00</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "             Rating\n",
+       "count  3.255351e+06\n",
+       "mean   3.481188e+00\n",
+       "std    1.082873e+00\n",
+       "min    1.000000e+00\n",
+       "25%    3.000000e+00\n",
+       "50%    4.000000e+00\n",
+       "75%    4.000000e+00\n",
+       "max    5.000000e+00"
+      ]
+     },
+     "execution_count": 65,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Rating Distribution\n",
+    "pandas_train_df['Rating'].describe().to_frame()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 66,
+   "id": "a5d3769d",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>Rating</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>count</th>\n",
+       "      <td>100477.000000</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>mean</th>\n",
+       "      <td>3.479483</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>std</th>\n",
+       "      <td>1.085257</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>min</th>\n",
+       "      <td>1.000000</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>25%</th>\n",
+       "      <td>3.000000</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>50%</th>\n",
+       "      <td>4.000000</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>75%</th>\n",
+       "      <td>4.000000</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>max</th>\n",
+       "      <td>5.000000</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "              Rating\n",
+       "count  100477.000000\n",
+       "mean        3.479483\n",
+       "std         1.085257\n",
+       "min         1.000000\n",
+       "25%         3.000000\n",
+       "50%         4.000000\n",
+       "75%         4.000000\n",
+       "max         5.000000"
+      ]
+     },
+     "execution_count": 66,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Rating Distribution\n",
+    "pandas_test_df['Rating'].describe().to_frame()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 67,
+   "id": "263e5af1",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>MovieID</th>\n",
+       "      <th>UserIDCount</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>6971</td>\n",
+       "      <td>25468</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>6287</td>\n",
+       "      <td>24393</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>4640</td>\n",
+       "      <td>23525</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>9728</td>\n",
+       "      <td>23184</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>8596</td>\n",
+       "      <td>23005</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "   MovieID  UserIDCount\n",
+       "0     6971        25468\n",
+       "1     6287        24393\n",
+       "2     4640        23525\n",
+       "3     9728        23184\n",
+       "4     8596        23005"
+      ]
+     },
+     "execution_count": 67,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "pandas_train_df.groupby('MovieID')['UserID'].count().sort_values(ascending=False).reset_index(name='UserIDCount').head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 68,
+   "id": "c0e7e145",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>MovieID</th>\n",
+       "      <th>UserIDCount</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>6971</td>\n",
+       "      <td>811</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>4640</td>\n",
+       "      <td>756</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>6287</td>\n",
+       "      <td>737</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>9728</td>\n",
+       "      <td>706</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>8915</td>\n",
+       "      <td>695</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "   MovieID  UserIDCount\n",
+       "0     6971          811\n",
+       "1     4640          756\n",
+       "2     6287          737\n",
+       "3     9728          706\n",
+       "4     8915          695"
+      ]
+     },
+     "execution_count": 68,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "pandas_test_df.groupby('MovieID')['UserID'].count().sort_values(ascending=False).reset_index(name='UserIDCount').head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 84,
+   "id": "497262d2",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "DataFrame[MovieID: int, Title: string]"
+      ]
+     },
+     "execution_count": 84,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Obtaining mean rating for every movie\n",
+    "sorted_movies = pandas_train_df.groupby('MovieID').mean()\n",
+    "sorted_movies.sort_values(['Rating'], ascending=False, inplace = True)\n",
+    "top10movies = list(sorted_movies.head(10).index)\n",
+    "bottom10movies = list(sorted_movies.tail(10).index)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 103,
+   "id": "cdcce0a5",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>MovieID</th>\n",
+       "      <th>Title</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>1254</th>\n",
+       "      <td>1256</td>\n",
+       "      <td>The Best of Friends: Vol. 4</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3031</th>\n",
+       "      <td>3033</td>\n",
+       "      <td>Ghost in the Shell: Stand Alone Complex: 2nd Gig</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3288</th>\n",
+       "      <td>3290</td>\n",
+       "      <td>The Godfather</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4236</th>\n",
+       "      <td>4238</td>\n",
+       "      <td>Inu-Yasha</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>5758</th>\n",
+       "      <td>5760</td>\n",
+       "      <td>The Sopranos: Season 3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>7567</th>\n",
+       "      <td>7569</td>\n",
+       "      <td>Dead Like Me: Season 2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>12291</th>\n",
+       "      <td>12293</td>\n",
+       "      <td>The Godfather</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>14281</th>\n",
+       "      <td>14283</td>\n",
+       "      <td>The Best of Friends: Vol. 3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>14646</th>\n",
+       "      <td>14648</td>\n",
+       "      <td>Finding Nemo (Full-screen)</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>16145</th>\n",
+       "      <td>16147</td>\n",
+       "      <td>The Sopranos: Season 1</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "       MovieID                                             Title\n",
+       "1254      1256                       The Best of Friends: Vol. 4\n",
+       "3031      3033  Ghost in the Shell: Stand Alone Complex: 2nd Gig\n",
+       "3288      3290                                     The Godfather\n",
+       "4236      4238                                         Inu-Yasha\n",
+       "5758      5760                            The Sopranos: Season 3\n",
+       "7567      7569                            Dead Like Me: Season 2\n",
+       "12291    12293                                     The Godfather\n",
+       "14281    14283                       The Best of Friends: Vol. 3\n",
+       "14646    14648                        Finding Nemo (Full-screen)\n",
+       "16145    16147                            The Sopranos: Season 1"
+      ]
+     },
+     "execution_count": 103,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Top rated movies\n",
+    "pandas_movies_df[pandas_movies_df['MovieID'].isin(top10movies)]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 104,
+   "id": "40b39bb3",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>MovieID</th>\n",
+       "      <th>Title</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>1922</th>\n",
+       "      <td>1924</td>\n",
+       "      <td>Terror Toons</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>6361</th>\n",
+       "      <td>6363</td>\n",
+       "      <td>Hot Wax Zombies on Wheels</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>7087</th>\n",
+       "      <td>7089</td>\n",
+       "      <td>Blood Sisters of Lesbian Sin</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>9694</th>\n",
+       "      <td>9696</td>\n",
+       "      <td>Fart: The Movie</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>11684</th>\n",
+       "      <td>11686</td>\n",
+       "      <td>Da Hip Hop Witch</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>12885</th>\n",
+       "      <td>12887</td>\n",
+       "      <td>Legend of the Chupacabra</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>14738</th>\n",
+       "      <td>14740</td>\n",
+       "      <td>Seamless</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>14773</th>\n",
+       "      <td>14775</td>\n",
+       "      <td>Vicious</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>15081</th>\n",
+       "      <td>15083</td>\n",
+       "      <td>Mulva: Zombie Ass Kicker! / Filthy McNasty (Do...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>15685</th>\n",
+       "      <td>15687</td>\n",
+       "      <td>Vampiyaz</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "       MovieID                                              Title\n",
+       "1922      1924                                       Terror Toons\n",
+       "6361      6363                          Hot Wax Zombies on Wheels\n",
+       "7087      7089                       Blood Sisters of Lesbian Sin\n",
+       "9694      9696                                    Fart: The Movie\n",
+       "11684    11686                                   Da Hip Hop Witch\n",
+       "12885    12887                           Legend of the Chupacabra\n",
+       "14738    14740                                           Seamless\n",
+       "14773    14775                                            Vicious\n",
+       "15081    15083  Mulva: Zombie Ass Kicker! / Filthy McNasty (Do...\n",
+       "15685    15687                                           Vampiyaz"
+      ]
+     },
+     "execution_count": 104,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Bottom rated movies\n",
+    "pandas_movies_df[pandas_movies_df['MovieID'].isin(bottom10movies)]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 86,
+   "id": "83592ce2",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>UserID</th>\n",
+       "      <th>MovieID</th>\n",
+       "      <th>Rating</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>1395430</td>\n",
+       "      <td>8</td>\n",
+       "      <td>2.0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>1205593</td>\n",
+       "      <td>8</td>\n",
+       "      <td>4.0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>1488844</td>\n",
+       "      <td>8</td>\n",
+       "      <td>4.0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>1447354</td>\n",
+       "      <td>8</td>\n",
+       "      <td>1.0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>306466</td>\n",
+       "      <td>8</td>\n",
+       "      <td>4.0</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "    UserID  MovieID  Rating\n",
+       "0  1395430        8     2.0\n",
+       "1  1205593        8     4.0\n",
+       "2  1488844        8     4.0\n",
+       "3  1447354        8     1.0\n",
+       "4   306466        8     4.0"
+      ]
+     },
+     "execution_count": 86,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Getting only significant columns for the UIM matrix\n",
+    "uim = pandas_train_df[['UserID', 'MovieID', 'Rating']].copy()\n",
+    "uim.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 87,
+   "id": "e690145a",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th>MovieID</th>\n",
+       "      <th>8</th>\n",
+       "      <th>28</th>\n",
+       "      <th>43</th>\n",
+       "      <th>48</th>\n",
+       "      <th>61</th>\n",
+       "      <th>64</th>\n",
+       "      <th>66</th>\n",
+       "      <th>92</th>\n",
+       "      <th>96</th>\n",
+       "      <th>111</th>\n",
+       "      <th>...</th>\n",
+       "      <th>17654</th>\n",
+       "      <th>17660</th>\n",
+       "      <th>17689</th>\n",
+       "      <th>17693</th>\n",
+       "      <th>17706</th>\n",
+       "      <th>17725</th>\n",
+       "      <th>17728</th>\n",
+       "      <th>17734</th>\n",
+       "      <th>17741</th>\n",
+       "      <th>17742</th>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>UserID</th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>7</th>\n",
+       "      <td>5.0</td>\n",
+       "      <td>4.0</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>79</th>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>199</th>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>4.0</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>481</th>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>5.0</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>769</th>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>5 rows × 1821 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "MovieID  8      28     43     48     61     64     66     92     96     111    \\\n",
+       "UserID                                                                          \n",
+       "7          5.0    4.0    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN   \n",
+       "79         NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN   \n",
+       "199        NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN    4.0   \n",
+       "481        NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN    5.0   \n",
+       "769        NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN   \n",
+       "\n",
+       "MovieID  ...  17654  17660  17689  17693  17706  17725  17728  17734  17741  \\\n",
+       "UserID   ...                                                                  \n",
+       "7        ...    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN   \n",
+       "79       ...    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN   \n",
+       "199      ...    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN   \n",
+       "481      ...    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN   \n",
+       "769      ...    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN    NaN   \n",
+       "\n",
+       "MovieID  17742  \n",
+       "UserID          \n",
+       "7          NaN  \n",
+       "79         NaN  \n",
+       "199        NaN  \n",
+       "481        NaN  \n",
+       "769        NaN  \n",
+       "\n",
+       "[5 rows x 1821 columns]"
+      ]
+     },
+     "execution_count": 87,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Creating UIM matrix using pivot\n",
+    "uim = uim.pivot(index='UserID', columns='MovieID', values='Rating')\n",
+    "uim.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 88,
+   "id": "159fb4fb",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th>MovieID</th>\n",
+       "      <th>8</th>\n",
+       "      <th>28</th>\n",
+       "      <th>43</th>\n",
+       "      <th>48</th>\n",
+       "      <th>61</th>\n",
+       "      <th>64</th>\n",
+       "      <th>66</th>\n",
+       "      <th>92</th>\n",
+       "      <th>96</th>\n",
+       "      <th>111</th>\n",
+       "      <th>...</th>\n",
+       "      <th>17654</th>\n",
+       "      <th>17660</th>\n",
+       "      <th>17689</th>\n",
+       "      <th>17693</th>\n",
+       "      <th>17706</th>\n",
+       "      <th>17725</th>\n",
+       "      <th>17728</th>\n",
+       "      <th>17734</th>\n",
+       "      <th>17741</th>\n",
+       "      <th>17742</th>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>UserID</th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>7</th>\n",
+       "      <td>5.0</td>\n",
+       "      <td>4.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>...</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>79</th>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>...</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>199</th>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>4.0</td>\n",
+       "      <td>...</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>481</th>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>5.0</td>\n",
+       "      <td>...</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>769</th>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>...</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>0.0</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>5 rows × 1821 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "MovieID  8      28     43     48     61     64     66     92     96     111    \\\n",
+       "UserID                                                                          \n",
+       "7          5.0    4.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0   \n",
+       "79         0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0   \n",
+       "199        0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    4.0   \n",
+       "481        0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    5.0   \n",
+       "769        0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0   \n",
+       "\n",
+       "MovieID  ...  17654  17660  17689  17693  17706  17725  17728  17734  17741  \\\n",
+       "UserID   ...                                                                  \n",
+       "7        ...    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0   \n",
+       "79       ...    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0   \n",
+       "199      ...    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0   \n",
+       "481      ...    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0   \n",
+       "769      ...    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0   \n",
+       "\n",
+       "MovieID  17742  \n",
+       "UserID          \n",
+       "7          0.0  \n",
+       "79         0.0  \n",
+       "199        0.0  \n",
+       "481        0.0  \n",
+       "769        0.0  \n",
+       "\n",
+       "[5 rows x 1821 columns]"
+      ]
+     },
+     "execution_count": 88,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Filling NA's with 0\n",
+    "uim = uim.fillna(0)\n",
+    "uim.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 93,
+   "id": "87d535c5",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#!pip3 install scikit-learn scipy\n",
+    "from sklearn.metrics.pairwise import cosine_similarity\n",
+    "\n",
+    "# Function for finding similar users\n",
+    "# Receives:\n",
+    "# - user: The ratings made by the user to study\n",
+    "# - uim: The User Item Matrix with all other users to calculate similarity\n",
+    "def findSimilarUsers(user, uim):\n",
+    "    similarity = []\n",
+    "    for i,row in enumerate(uim.values):\n",
+    "        cos = cosine_similarity(user, row.reshape(1, -1))[0][0]\n",
+    "        similarity.append([i, cos])\n",
+    "    temp = pd.DataFrame(similarity, columns=['UserID', 'similarity'])\n",
+    "    temp = temp.sort_values(by=['similarity'], ascending=False).copy()\n",
+    "    similar_users = list(temp['UserID'].values)\n",
+    "    similarities = list(temp['similarity'].values)\n",
+    "\n",
+    "    return (similar_users, similarities)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 94,
+   "id": "854573b2",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Test user is created by selecting the first user of the UIM matrix\n",
+    "user = uim.iloc[0].values.reshape(1, -1)\n",
+    "temp = findSimilarUsers(user, uim)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 95,
+   "id": "ccbba763",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "[0, 25579, 22260, 9457, 26442]"
+      ]
+     },
+     "execution_count": 95,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# The top 5 similar users are:\n",
+    "temp[0][0:5]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 96,
+   "id": "d39f20e8",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "[1.0,\n",
+       " 0.5916785801335092,\n",
+       " 0.5813912375803018,\n",
+       " 0.5774919071521013,\n",
+       " 0.5761935191093228]"
+      ]
+     },
+     "execution_count": 96,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# The cosine similarity obtained respectively for that users are:\n",
+    "temp[1][0:5]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 97,
+   "id": "16c4c446",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Function that returns the most suitable recommendations of movies\n",
+    "# Requires:\n",
+    "# - user: The ratings made by the user to study\n",
+    "# - uim: The User Item Matrix with all other users to calculate similarity\n",
+    "# - recommendations: Number of expected recommendations\n",
+    "# - analyzed_users: Number of similar users to analyze\n",
+    "# - findSimilarUsers: Function that finds similar users from the dataset\n",
+    "\n",
+    "def findSimilarMovies(user, uim, recommendations=10, analyzed_users=10):\n",
+    "    # Looking for movies that the user has already seen\n",
+    "    seen = list(uim.columns[list((user>0)[0])])\n",
+    "    \n",
+    "    # Looking for similar users\n",
+    "    similars = findSimilarUsers(user, uim)\n",
+    "    \n",
+    "    # The Dataframe of results is ceated\n",
+    "    scores = pd.DataFrame(columns=['MovieID', 'score'])\n",
+    "    dtypes = np.dtype([\n",
+    "          ('MovieID', int),          \n",
+    "          ('score', float),          \n",
+    "          ])\n",
+    "\n",
+    "    # For the top similar users (analyzed users) the process gets repeated\n",
+    "    for sim_user, sim_score in zip(similars[0][0:analyzed_users], similars[1][0:analyzed_users]):\n",
+    "        # Dropping movies that the studied user has already seen\n",
+    "        rec_movies = uim.iloc[sim_user].drop(seen)\n",
+    "        # Dropping low rated movies\n",
+    "        rec_index = list(rec_movies[rec_movies>4].index.values)        \n",
+    "        \n",
+    "        if (len(rec_index)>0):\n",
+    "            # For every recommended movies of a particualar similar user:\n",
+    "            for movie in rec_index:\n",
+    "                # If the movie is not in the dataframe, it will add it to the dataframe\n",
+    "                if (movie not in scores['MovieID'].values):\n",
+    "                    scores.loc[len(scores)] = (movie, 10*sim_score)\n",
+    "                else: \n",
+    "                # If the movies is already in the dataframe , it will increase its score\n",
+    "                    scores.loc[scores['MovieID']==movie, 'score'] += 10*sim_score\n",
+    "        # The values are sorted by the score obtained\n",
+    "        scores.sort_values(by='score', ascending=False, inplace=True)\n",
+    "        \n",
+    "        # There could the case that not enough users are similar\n",
+    "        try:\n",
+    "            scores = scores.head(recommendations)\n",
+    "            scores['MovieID'] = scores['MovieID'].astype(int)\n",
+    "        except:\n",
+    "            scores['MovieID'] = scores['MovieID'].astype(int)\n",
+    "    \n",
+    "    # The movie id's and their corresponding scores are returned in lists\n",
+    "    return (list(scores.MovieID.values), list(scores.score.values))   "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 98,
+   "id": "b5cd99ae",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>MovieID</th>\n",
+       "      <th>Score</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>12280</td>\n",
+       "      <td>23.003437</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>13636</td>\n",
+       "      <td>17.286390</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>11812</td>\n",
+       "      <td>17.247149</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>442</td>\n",
+       "      <td>11.588831</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>13015</td>\n",
+       "      <td>11.552155</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>5</th>\n",
+       "      <td>7569</td>\n",
+       "      <td>5.916786</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>6</th>\n",
+       "      <td>13477</td>\n",
+       "      <td>5.813912</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>7</th>\n",
+       "      <td>11888</td>\n",
+       "      <td>5.813912</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>8</th>\n",
+       "      <td>9798</td>\n",
+       "      <td>5.813912</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>9</th>\n",
+       "      <td>13614</td>\n",
+       "      <td>5.694994</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "   MovieID      Score\n",
+       "0    12280  23.003437\n",
+       "1    13636  17.286390\n",
+       "2    11812  17.247149\n",
+       "3      442  11.588831\n",
+       "4    13015  11.552155\n",
+       "5     7569   5.916786\n",
+       "6    13477   5.813912\n",
+       "7    11888   5.813912\n",
+       "8     9798   5.813912\n",
+       "9    13614   5.694994"
+      ]
+     },
+     "execution_count": 98,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# movie Id and Score obtained for that recommendation\n",
+    "ids, scores = findSimilarMovies(user, uim)    \n",
+    "pd.DataFrame({'MovieID': ids, 'Score': scores})"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 101,
+   "id": "bc55ee58",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>MovieID</th>\n",
+       "      <th>Title</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>440</th>\n",
+       "      <td>442</td>\n",
+       "      <td>Mississippi Burning</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>7567</th>\n",
+       "      <td>7569</td>\n",
+       "      <td>Dead Like Me: Season 2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>9796</th>\n",
+       "      <td>9798</td>\n",
+       "      <td>A Civil Action</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>11810</th>\n",
+       "      <td>11812</td>\n",
+       "      <td>Million Dollar Baby</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>11886</th>\n",
+       "      <td>11888</td>\n",
+       "      <td>In the Line of Fire</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>12278</th>\n",
+       "      <td>12280</td>\n",
+       "      <td>The Jerk</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>13013</th>\n",
+       "      <td>13015</td>\n",
+       "      <td>The Lost Boys: Special Edition</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>13475</th>\n",
+       "      <td>13477</td>\n",
+       "      <td>Stephen King's The Shining</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>13612</th>\n",
+       "      <td>13614</td>\n",
+       "      <td>Office Space</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>13634</th>\n",
+       "      <td>13636</td>\n",
+       "      <td>Fast Times at Ridgemont High</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "       MovieID                           Title\n",
+       "440        442             Mississippi Burning\n",
+       "7567      7569          Dead Like Me: Season 2\n",
+       "9796      9798                  A Civil Action\n",
+       "11810    11812             Million Dollar Baby\n",
+       "11886    11888             In the Line of Fire\n",
+       "12278    12280                        The Jerk\n",
+       "13013    13015  The Lost Boys: Special Edition\n",
+       "13475    13477      Stephen King's The Shining\n",
+       "13612    13614                    Office Space\n",
+       "13634    13636    Fast Times at Ridgemont High"
+      ]
+     },
+     "execution_count": 101,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Looking for what movies belong to those movie ids\n",
+    "pandas_movies_df[pandas_movies_df['MovieID'].isin(ids)]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "8a9207a7",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from surprise import KNNBasic\n",
+    "from surprise.model_selection import cross_validate\n",
+    "from surprise import Dataset\n",
+    "from surprise import Reader"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 15,
+   "id": "d1376401",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "22/05/03 08:29:18 WARN CacheManager: Asked to cache already cached data.\n",
+      "22/05/03 08:29:18 WARN CacheManager: Asked to cache already cached data.\n",
+      "22/05/03 08:29:18 WARN CacheManager: Asked to cache already cached data.\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Training: 60335, validation: 20264, test: 19878\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "#taking more time to execute for Training Dataset so given splitted validation data as input\n",
+    "seed = 99\n",
+    "(sample_train_df, sample_test_df, sample_val_df) = testingRatings_df.randomSplit([6.0, 2.0, 2.0], seed)\n",
+    "\n",
+    "# Let's cache these datasets for performance\n",
+    "sample_training_df = sample_train_df.cache()\n",
+    "sample_validation_df = sample_val_df.cache()\n",
+    "sample_test_df = sample_test_df.cache()\n",
+    "\n",
+    "print('Training: {0}, validation: {1}, test: {2}\\n'.format(\n",
+    "  sample_training_df.count(), sample_validation_df.count(), sample_test_df.count())\n",
+    ")\n",
+    "\n",
+    "#pandasDF = trainingRatings_df.toPandas()\n",
+    "pandasDF = sample_test_df.toPandas()  #taking more time to execute so given validation data as input\n",
+    "reader = Reader(rating_scale=(1, 5))\n",
+    "dataset = Dataset.load_from_df(pandasDF,reader)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 16,
+   "id": "2b7f51f6",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Computing the pearson similarity matrix...\n",
+      "Done computing similarity matrix.\n",
+      "Computing the pearson similarity matrix...\n",
+      "Done computing similarity matrix.\n",
+      "Computing the pearson similarity matrix...\n",
+      "Done computing similarity matrix.\n",
+      "Computing the pearson similarity matrix...\n",
+      "Done computing similarity matrix.\n",
+      "Computing the pearson similarity matrix...\n",
+      "Done computing similarity matrix.\n",
+      "Evaluating RMSE of algorithm KNNBasic on 5 split(s).\n",
+      "\n",
+      "                  Fold 1  Fold 2  Fold 3  Fold 4  Fold 5  Mean    Std     \n",
+      "RMSE (testset)    1.0836  1.0637  1.0729  1.0905  1.0953  1.0812  0.0115  \n",
+      "Fit time          0.04    0.03    0.02    0.03    0.02    0.03    0.01    \n",
+      "Test time         0.02    0.02    0.02    0.02    0.02    0.02    0.00    \n"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "{'test_rmse': array([1.08357518, 1.06373031, 1.07291963, 1.0904588 , 1.09529248]),\n",
+       " 'fit_time': (0.038956642150878906,\n",
+       "  0.02957749366760254,\n",
+       "  0.022879362106323242,\n",
+       "  0.026577472686767578,\n",
+       "  0.024404525756835938),\n",
+       " 'test_time': (0.01745152473449707,\n",
+       "  0.018187284469604492,\n",
+       "  0.018151283264160156,\n",
+       "  0.018984079360961914,\n",
+       "  0.018859386444091797)}"
+      ]
+     },
+     "execution_count": 16,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "#Item Based approach\n",
+    "sim_options = {\n",
+    "    'name': 'pearson',\n",
+    "    'user_based': 'False'\n",
+    "}\n",
+    "\n",
+    "clf = KNNBasic(sim_options = sim_options)\n",
+    "cross_validate(clf, dataset, measures=['RMSE'], cv=5, verbose=True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 17,
+   "id": "9215a8cc",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Computing the msd similarity matrix...\n",
+      "Done computing similarity matrix.\n",
+      "Computing the msd similarity matrix...\n",
+      "Done computing similarity matrix.\n",
+      "Computing the msd similarity matrix...\n",
+      "Done computing similarity matrix.\n",
+      "Computing the msd similarity matrix...\n",
+      "Done computing similarity matrix.\n",
+      "Computing the msd similarity matrix...\n",
+      "Done computing similarity matrix.\n",
+      "Evaluating RMSE of algorithm KNNBasic on 5 split(s).\n",
+      "\n",
+      "                  Fold 1  Fold 2  Fold 3  Fold 4  Fold 5  Mean    Std     \n",
+      "RMSE (testset)    1.1080  1.0795  1.0945  1.0978  1.1020  1.0964  0.0096  \n",
+      "Fit time          0.02    0.02    0.02    0.01    0.02    0.02    0.00    \n",
+      "Test time         0.02    0.02    0.02    0.02    0.05    0.02    0.01    \n"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "{'test_rmse': array([1.10803896, 1.07948551, 1.09445181, 1.09776033, 1.10202666]),\n",
+       " 'fit_time': (0.02236151695251465,\n",
+       "  0.016630172729492188,\n",
+       "  0.01509547233581543,\n",
+       "  0.014615297317504883,\n",
+       "  0.017407894134521484),\n",
+       " 'test_time': (0.018701553344726562,\n",
+       "  0.017722606658935547,\n",
+       "  0.017951488494873047,\n",
+       "  0.018004655838012695,\n",
+       "  0.05188584327697754)}"
+      ]
+     },
+     "execution_count": 17,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "#User Based approach\n",
+    "sim_options = {\n",
+    "    'name': 'MSD',\n",
+    "    'user_based': 'True'\n",
+    "}\n",
+    "\n",
+    "clf = KNNBasic(sim_options = sim_options)\n",
+    "cross_validate(clf, dataset, measures=['RMSE'], cv=5, verbose=True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "id": "c46e48dd",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Import the required functions\n",
+    "from pyspark.ml.evaluation import RegressionEvaluator\n",
+    "from pyspark.ml.recommendation import ALS\n",
+    "from pyspark.ml.tuning import ParamGridBuilder, CrossValidator\n",
+    "# Create ALS model\n",
+    "als = ALS(\n",
+    "         maxIter=10,\n",
+    "         userCol=\"UserID\", \n",
+    "         itemCol=\"MovieID\",\n",
+    "         ratingCol=\"Rating\", \n",
+    "         nonnegative = True, \n",
+    "         implicitPrefs = False,\n",
+    "         coldStartStrategy=\"drop\"\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "id": "77842dca",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Import the requisite packages\n",
+    "from pyspark.ml.tuning import ParamGridBuilder, CrossValidator\n",
+    "from pyspark.ml.evaluation import RegressionEvaluator"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "749efcd8",
+   "metadata": {},
+   "source": [
+    "ParamGridBuilder: We will first define the tuning parameter using param_grid function, please feel free experiment with parameters for the grid. I have only chosen 4 parameters for each grid. This will result in 16 models for training.# "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "id": "cf270eda",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Num models to be tested:  9\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Add hyperparameters and their respective values to param_grid\n",
+    "param_grid = ParamGridBuilder() \\\n",
+    "            .addGrid(als.rank, [10, 20, 50,]) \\\n",
+    "            .addGrid(als.regParam, [.01, .05, .1, ]) \\\n",
+    "            .build()\n",
+    "print (\"Num models to be tested: \", len(param_grid))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "ec3420b0",
+   "metadata": {},
+   "source": [
+    "# RegressionEvaluator"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "ab7cf2e5",
+   "metadata": {},
+   "source": [
+    " Define the evaluator, select rmse as metricName in evaluator."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "id": "2c8235f1",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Define evaluator as RMSE \n",
+    "rmse_evaluator = RegressionEvaluator(\n",
+    "           metricName=\"rmse\", \n",
+    "           labelCol=\"Rating\", \n",
+    "           predictionCol=\"prediction\") "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "id": "bcad4d53",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Define evaluator as MSE\n",
+    "mse_evaluator = RegressionEvaluator(\n",
+    "           metricName=\"mse\", \n",
+    "           labelCol=\"Rating\", \n",
+    "           predictionCol=\"prediction\") "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "id": "50e3fe40",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Build cross validation using CrossValidator\n",
+    "cv = CrossValidator(estimator=als, estimatorParamMaps=param_grid, evaluator=rmse_evaluator, numFolds=5)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "id": "23f555d4",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "                                                                                \r"
+     ]
+    }
+   ],
+   "source": [
+    "#Fit cross validator to the 'train' dataset\n",
+    "model = cv.fit(trainingRatings_df)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 14,
+   "id": "4b238743",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "**Best Model**\n",
+      "  Rank: 20\n",
+      "  MaxIter: 10\n",
+      "  RegParam: 0.05\n"
+     ]
+    }
+   ],
+   "source": [
+    "#Extract best model from the cv model above\n",
+    "best_model = model.bestModel\n",
+    "print(\"**Best Model**\")\n",
+    "# Print \"Rank\"\n",
+    "print(\"  Rank:\", best_model._java_obj.parent().getRank())\n",
+    "# Print \"MaxIter\"\n",
+    "print(\"  MaxIter:\", best_model._java_obj.parent().getMaxIter())\n",
+    "# Print \"RegParam\"\n",
+    "print(\"  RegParam:\", best_model._java_obj.parent().getRegParam())"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 15,
+   "id": "5c451f70",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# View the predictions\n",
+    "test_predictions = best_model.transform(testingRatings_df)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 16,
+   "id": "23d9d703",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Model Predicted Ratings on Test data : \n",
+      "\n",
+      "+-------+-------+------+----------+\n",
+      "|MovieID|UserID |Rating|prediction|\n",
+      "+-------+-------+------+----------+\n",
+      "|28     |2358799|3.0   |3.861073  |\n",
+      "|156    |973051 |5.0   |4.066124  |\n",
+      "|851    |1189060|3.0   |3.5445638 |\n",
+      "|1100   |2376892|2.0   |2.2553442 |\n",
+      "|1123   |1628484|3.0   |3.4171214 |\n",
+      "+-------+-------+------+----------+\n",
+      "only showing top 5 rows\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(\"Model Predicted Ratings on Test data : \\n\")  \n",
+    "test_predictions.show(5, truncate=False)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 17,
+   "id": "ef19b872",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "[Stage 4065:========================================>           (155 + 8) / 200]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "RMSE Error on Test data :  0.8356966096190834\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "                                                                                \r"
+     ]
+    }
+   ],
+   "source": [
+    "RMSE = rmse_evaluator.evaluate(test_predictions)\n",
+    "print('RMSE Error on Test data : ', RMSE)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 18,
+   "id": "31428636",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "[Stage 4095:===================================>                (136 + 8) / 200]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "MSE Error on Test data :  0.6983888233288308\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "                                                                                \r"
+     ]
+    }
+   ],
+   "source": [
+    "\n",
+    "MSE = mse_evaluator.evaluate(test_predictions)\n",
+    "print('MSE Error on Test data : ', MSE)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 19,
+   "id": "a87389f9",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "[Stage 4121:====================================================>(99 + 1) / 100]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+------+--------------------+\n",
+      "|UserID|     recommendations|\n",
+      "+------+--------------------+\n",
+      "|   481|[[7569, 5.200222]...|\n",
+      "|  2678|[[12421, 4.433958...|\n",
+      "|  3595|[[12293, 4.726034...|\n",
+      "|  6460|[[9973, 4.8176937...|\n",
+      "|  7284|[[7016, 5.561732]...|\n",
+      "|  7576|[[6522, 5.0784793...|\n",
+      "|  9597|[[15480, 4.309165...|\n",
+      "| 15191|[[6287, 4.7901707...|\n",
+      "| 15846|[[16147, 5.028747...|\n",
+      "| 20461|[[14283, 4.715459...|\n",
+      "| 20774|[[6991, 4.236231]...|\n",
+      "| 26258|[[1256, 4.410603]...|\n",
+      "| 27608|[[6991, 4.792004]...|\n",
+      "| 28346|[[17085, 4.641161...|\n",
+      "| 30941|[[6991, 5.4102864...|\n",
+      "| 30976|[[1256, 4.9180794...|\n",
+      "| 31203|[[12293, 4.52064]...|\n",
+      "| 36822|[[6287, 5.7062845...|\n",
+      "| 40851|[[17515, 4.41642]...|\n",
+      "| 41068|[[12293, 4.10149]...|\n",
+      "+------+--------------------+\n",
+      "only showing top 20 rows\n",
+      "\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "                                                                                \r"
+     ]
+    }
+   ],
+   "source": [
+    "# Generate n Recommendations for all users n = 10\n",
+    "recommendations = best_model.recommendForAllUsers(10)\n",
+    "recommendations.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 20,
+   "id": "37827056",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "[Stage 4172:==================================================>  (96 + 4) / 100]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+------+-------+---------+\n",
+      "|UserID|MovieID|   Rating|\n",
+      "+------+-------+---------+\n",
+      "|   481|   7569| 5.200222|\n",
+      "|   481|   7916|5.0914083|\n",
+      "|   481|  16559|5.0560937|\n",
+      "|   481|   6991|4.9898877|\n",
+      "|   481|   5813| 4.933182|\n",
+      "|   481|   2985|4.9163003|\n",
+      "|   481|  14648|4.9094286|\n",
+      "|   481|   7382|  4.88799|\n",
+      "|   481|  17515| 4.882816|\n",
+      "|   481|   4238|4.8812647|\n",
+      "+------+-------+---------+\n",
+      "\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "                                                                                \r"
+     ]
+    }
+   ],
+   "source": [
+    "nrecommendations = recommendations\\\n",
+    "    .withColumn(\"rec_exp\", explode(\"recommendations\"))\\\n",
+    "    .select('UserID', col(\"rec_exp.MovieID\"), col(\"rec_exp.Rating\"))\n",
+    "\n",
+    "nrecommendations.limit(10).show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "07792f41",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#movieTitles_df.show(3)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 21,
+   "id": "b3c4d492",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "[Stage 4251:=================================================>   (94 + 6) / 100]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+-------+------+---------+--------------------+\n",
+      "|MovieID|UserID|   Rating|               Title|\n",
+      "+-------+------+---------+--------------------+\n",
+      "|   7569|   481| 5.200222|Dead Like Me: Sea...|\n",
+      "|   7916|   481|5.0914083|Tibetan Book of t...|\n",
+      "|  16559|   481|5.0560937|Red Green: Stuffe...|\n",
+      "|   6991|   481|4.9898877|    A History of God|\n",
+      "|   5813|   481| 4.933182|Diana Krall: Live...|\n",
+      "|   2985|   481|4.9163003|There's Something...|\n",
+      "|  14648|   481|4.9094286|Finding Nemo (Ful...|\n",
+      "|   7382|   481|  4.88799|WWE: Tombstone: T...|\n",
+      "|  17515|   481| 4.882816|LeapFrog: Letter ...|\n",
+      "|   4238|   481|4.8812647|           Inu-Yasha|\n",
+      "+-------+------+---------+--------------------+\n",
+      "only showing top 10 rows\n",
+      "\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "                                                                                \r"
+     ]
+    }
+   ],
+   "source": [
+    "total_rec_df = nrecommendations.join(movieTitles_df, on='MovieID')\n",
+    "total_rec_df.show(10)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 22,
+   "id": "322a565a",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "[Stage 4303:===================================================> (98 + 2) / 100]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+-------+------+---------+--------------------+\n",
+      "|MovieID|UserID|   Rating|               Title|\n",
+      "+-------+------+---------+--------------------+\n",
+      "|  12421|  2678|4.4339585|        The Crusades|\n",
+      "|  15480|  2678|4.3982887|Farscape: The Pea...|\n",
+      "|  12125|  2678|4.3975625|The Blue Planet: ...|\n",
+      "|  12544|  2678|4.3677964|Peter Gabriel: Pl...|\n",
+      "|   4238|  2678|4.3015156|           Inu-Yasha|\n",
+      "|   7283|  2678|4.2696924|Due South: Call o...|\n",
+      "|  10947|  2678| 4.256988|     The Incredibles|\n",
+      "|  17515|  2678|4.2543573|LeapFrog: Letter ...|\n",
+      "|   2160|  2678| 4.209249|Magnetic Storm: Nova|\n",
+      "|   7505|  2678| 4.186874|Fushigi Yugi: The...|\n",
+      "+-------+------+---------+--------------------+\n",
+      "\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "                                                                                \r"
+     ]
+    }
+   ],
+   "source": [
+    "total_rec_df.filter('UserId = 2678').sort('Rating', ascending=False).limit(10).show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 23,
+   "id": "d72d54df",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "[Stage 4355:==========>  (83 + 8) / 100][Stage 4356:>               (0 + 0) / 1]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+-------+------+---------+--------------------+\n",
+      "|MovieID|UserID|   Rating|               Title|\n",
+      "+-------+------+---------+--------------------+\n",
+      "|   7569|   481| 5.200222|Dead Like Me: Sea...|\n",
+      "|   7916|   481|5.0914083|Tibetan Book of t...|\n",
+      "|  16559|   481|5.0560937|Red Green: Stuffe...|\n",
+      "|   6991|   481|4.9898877|    A History of God|\n",
+      "|   5813|   481| 4.933182|Diana Krall: Live...|\n",
+      "|   2985|   481|4.9163003|There's Something...|\n",
+      "|  14648|   481|4.9094286|Finding Nemo (Ful...|\n",
+      "|   7382|   481|  4.88799|WWE: Tombstone: T...|\n",
+      "|  17515|   481| 4.882816|LeapFrog: Letter ...|\n",
+      "|   4238|   481|4.8812647|           Inu-Yasha|\n",
+      "+-------+------+---------+--------------------+\n",
+      "\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "                                                                                \r"
+     ]
+    }
+   ],
+   "source": [
+    "total_rec_df.filter('UserId = 481').sort('Rating', ascending=False).limit(10).show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 24,
+   "id": "a128c101",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "[Stage 4409:==============================================>      (88 + 8) / 100]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+-------+-------+---------+--------------------+\n",
+      "|MovieID| UserID|   Rating|               Title|\n",
+      "+-------+-------+---------+--------------------+\n",
+      "|   6991|1395430|4.5091014|    A History of God|\n",
+      "|  12232|1395430|4.1886826| Lost in Translation|\n",
+      "|  10943|1395430| 4.161899|Ben Folds Five: C...|\n",
+      "|  10743|1395430|4.0438566|Pearl Jam: Tourin...|\n",
+      "|   8933|1395430| 4.035455|Ikiru: Bonus Mate...|\n",
+      "|   2355|1395430|4.0132585|Berlin: Symphony ...|\n",
+      "|  12125|1395430| 3.998653|The Blue Planet: ...|\n",
+      "|   3742|1395430|3.9916058|           Notorious|\n",
+      "|   7823|1395430|3.9832985|Monty Python's Th...|\n",
+      "|   6522|1395430|3.9576068|Trailer Park Boys...|\n",
+      "+-------+-------+---------+--------------------+\n",
+      "\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "                                                                                \r"
+     ]
+    }
+   ],
+   "source": [
+    "total_rec_df.filter('UserId = 1395430').sort('Rating', ascending=False).limit(10).show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 25,
+   "id": "248690a9",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "                                                                                \r"
+     ]
+    }
+   ],
+   "source": [
+    "# SAVE ALS model\n",
+    "als.save('./als_model')\n",
+    "# SAVE Cross validation model\n",
+    "model.save('./cv_model')"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "a09ff5c4",
+   "metadata": {},
+   "source": [
+    "# My Ratings Predictions"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 47,
+   "id": "fbe9c74d",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+-------+------+------+--------------------+\n",
+      "|MovieID|UserID|Rating|               Title|\n",
+      "+-------+------+------+--------------------+\n",
+      "|   6991|  5000|   5.0|    A History of God|\n",
+      "|  12232|  5000|   3.0| Lost in Translation|\n",
+      "|   7569|  5000|   2.5|Dead Like Me: Sea...|\n",
+      "|  16559|  5000|   4.0|Red Green: Stuffe...|\n",
+      "|   8933|  5000|   1.8|Ikiru: Bonus Mate...|\n",
+      "|   2355|  5000|   4.6|Berlin: Symphony ...|\n",
+      "|  12125|  5000|   1.0|The Blue Planet: ...|\n",
+      "|   2160|  5000|   2.0|Magnetic Storm: Nova|\n",
+      "|    209|  5000|   3.0|Star Trek: Deep S...|\n",
+      "|  17515|  5000|   3.5|LeapFrog: Letter ...|\n",
+      "|   2985|  5000|   0.0|There's Something...|\n",
+      "|     28|  5000|   5.0|     Lilo and Stitch|\n",
+      "|   1100|  5000|   3.0|   Dr. T & the Women|\n",
+      "|   4238|  5000|   4.0|           Inu-Yasha|\n",
+      "|   7283|  5000|   2.0|Due South: Call o...|\n",
+      "|   6522|  5000|   1.0|Trailer Park Boys...|\n",
+      "|  15040|  5000|   3.5|Rage Against the ...|\n",
+      "|   3151|  5000|   4.5|   Napoleon Dynamite|\n",
+      "|    218|  5000|   2.5|Triumph: Live at ...|\n",
+      "|   7016|  5000|   1.5|Raging Bull: Coll...|\n",
+      "+-------+------+------+--------------------+\n",
+      "only showing top 20 rows\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "from pyspark.sql import Row\n",
+    "my_user_id = 5000\n",
+    "\n",
+    "testingRatings_df_schema = StructType(\n",
+    "  [StructField('MovieID', IntegerType()),\n",
+    "   StructField('UserID', IntegerType()),\n",
+    "   StructField('Rating', DoubleType())]\n",
+    ")\n",
+    "# Note that the movie IDs are the *last* number on each line. A common error was to use the number of ratings as the movie ID.\n",
+    "# The format of each line is (my_user_id, movie ID, your rating)\n",
+    "my_rated_movies = [\n",
+    "             (6991,my_user_id,5.0),\n",
+    "             (12232,my_user_id,3.0),\n",
+    "             (7569,my_user_id,2.5),\n",
+    "             (16559,my_user_id,4.0),\n",
+    "             (8933,my_user_id,1.8),\n",
+    "             (2355,my_user_id,4.6),\n",
+    "             (12125,my_user_id,1.0),\n",
+    "             (2160,my_user_id,2.0),\n",
+    "             (209,my_user_id,3.0),\n",
+    "             (17515,my_user_id,3.5),\n",
+    "             (2985,my_user_id,0.0),\n",
+    "             (28,my_user_id,5.0),\n",
+    "             (1100,my_user_id,3.0),\n",
+    "             (4238,my_user_id,4.0),\n",
+    "             (7283,my_user_id,2.0),\n",
+    "             (6522,my_user_id,1.0),\n",
+    "             (15040,my_user_id,3.5),\n",
+    "             (3151,my_user_id,4.5),\n",
+    "             (218,my_user_id,2.5),\n",
+    "             (7016,my_user_id,1.5),\n",
+    "             (15567,my_user_id,1.8),\n",
+    "             (9701,my_user_id,2.8),\n",
+    "             (4963,my_user_id,3.0),\n",
+    "             (4,my_user_id,5.0),\n",
+    "             (1, my_user_id,4.6),\n",
+    "            \n",
+    "]\n",
+    "        \n",
+    "my_ratings_df = sqlContext.createDataFrame(my_rated_movies, schema=testingRatings_df_schema)\n",
+    "my_ratings_df.cache()\n",
+    "seed = 1999\n",
+    "my_train_df, my_test_df, my_val_df = my_ratings_df.randomSplit([6.0, 3.0, 1.0], seed)\n",
+    "my_test_df = my_test_df.union(my_val_df)\n",
+    "\n",
+    "my_train_df.cache()\n",
+    "my_test_df.cache()\n",
+    "\n",
+    "my_movies_df = my_ratings_df.join(movieTitles_df, on='MovieID')\n",
+    "my_movies_df.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 36,
+   "id": "202dfdb7",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+-------+------+------+\n",
+      "|MovieID|UserID|Rating|\n",
+      "+-------+------+------+\n",
+      "|   6991|  5000|   5.0|\n",
+      "|  12232|  5000|   3.0|\n",
+      "|   7569|  5000|   2.5|\n",
+      "|  16559|  5000|   4.0|\n",
+      "|   8933|  5000|   1.8|\n",
+      "|   2355|  5000|   4.6|\n",
+      "|  12125|  5000|   1.0|\n",
+      "|   2160|  5000|   2.0|\n",
+      "|    209|  5000|   3.0|\n",
+      "|  17515|  5000|   3.5|\n",
+      "|   2985|  5000|   0.0|\n",
+      "|     28|  5000|   5.0|\n",
+      "|   1100|  5000|   3.0|\n",
+      "|   4238|  5000|   4.0|\n",
+      "|   7283|  5000|   2.0|\n",
+      "|   6522|  5000|   1.0|\n",
+      "|  15040|  5000|   3.5|\n",
+      "|   3151|  5000|   4.5|\n",
+      "|    218|  5000|   2.5|\n",
+      "|   7016|  5000|   1.5|\n",
+      "+-------+------+------+\n",
+      "only showing top 20 rows\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "my_ratings_df.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 48,
+   "id": "e8fb41e3",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+-------+------+------+\n",
+      "|MovieID|UserID|Rating|\n",
+      "+-------+------+------+\n",
+      "|   7569|  5000|   2.5|\n",
+      "|   2355|  5000|   4.6|\n",
+      "|   8933|  5000|   1.8|\n",
+      "|  16559|  5000|   4.0|\n",
+      "|    209|  5000|   3.0|\n",
+      "|   2160|  5000|   2.0|\n",
+      "|  12125|  5000|   1.0|\n",
+      "|   2985|  5000|   0.0|\n",
+      "|  17515|  5000|   3.5|\n",
+      "|   7283|  5000|   2.0|\n",
+      "|   3151|  5000|   4.5|\n",
+      "|   6522|  5000|   1.0|\n",
+      "|   7016|  5000|   1.5|\n",
+      "|  15567|  5000|   1.8|\n",
+      "|      4|  5000|   5.0|\n",
+      "|   4963|  5000|   3.0|\n",
+      "|   9701|  5000|   2.8|\n",
+      "+-------+------+------+\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "my_train_df.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 49,
+   "id": "ef318042",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+-------+------+------+\n",
+      "|MovieID|UserID|Rating|\n",
+      "+-------+------+------+\n",
+      "|   6991|  5000|   5.0|\n",
+      "|  12232|  5000|   3.0|\n",
+      "|     28|  5000|   5.0|\n",
+      "|   1100|  5000|   3.0|\n",
+      "|   4238|  5000|   4.0|\n",
+      "|  15040|  5000|   3.5|\n",
+      "|    218|  5000|   2.5|\n",
+      "|      1|  5000|   4.6|\n",
+      "+-------+------+------+\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "my_test_df.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 50,
+   "id": "5cf6656a",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+-------+------+------+\n",
+      "|MovieID|UserID|Rating|\n",
+      "+-------+------+------+\n",
+      "|   6991|  5000|   5.0|\n",
+      "|  12232|  5000|   3.0|\n",
+      "|   7569|  5000|   2.5|\n",
+      "|  16559|  5000|   4.0|\n",
+      "|   8933|  5000|   1.8|\n",
+      "|   2355|  5000|   4.6|\n",
+      "|  12125|  5000|   1.0|\n",
+      "|   2160|  5000|   2.0|\n",
+      "|    209|  5000|   3.0|\n",
+      "|  17515|  5000|   3.5|\n",
+      "|   2985|  5000|   0.0|\n",
+      "|     28|  5000|   5.0|\n",
+      "|   1100|  5000|   3.0|\n",
+      "|   4238|  5000|   4.0|\n",
+      "|   7283|  5000|   2.0|\n",
+      "|   6522|  5000|   1.0|\n",
+      "|  15040|  5000|   3.5|\n",
+      "|   3151|  5000|   4.5|\n",
+      "|    218|  5000|   2.5|\n",
+      "|   7016|  5000|   1.5|\n",
+      "+-------+------+------+\n",
+      "only showing top 20 rows\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "# union the above created dataframes\n",
+    "my_train_df = my_ratings_df.union(trainingRatings_df)\n",
+    "# display\n",
+    "my_train_df.show(20)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 39,
+   "id": "5e612d4a",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "my_als = ALS(\n",
+    "         rank=20, maxIter=10, regParam=0.05, \n",
+    "         userCol=\"UserID\", \n",
+    "         itemCol=\"MovieID\",\n",
+    "         ratingCol=\"Rating\", \n",
+    "         nonnegative = True, \n",
+    "         implicitPrefs = False,\n",
+    "         coldStartStrategy=\"drop\"\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 51,
+   "id": "d87c8e50",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "                                                                                \r"
+     ]
+    }
+   ],
+   "source": [
+    "# Create the model with my parameters.\n",
+    "my_als_model = my_als.fit(my_train_df)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 52,
+   "id": "e81844ba",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "RMS error on the new data :  0.841859705031669\n"
+     ]
+    }
+   ],
+   "source": [
+    "my_test_predictions = my_als_model.transform(my_test_df)\n",
+    "my_rmse_error = rmse_evaluator.evaluate(my_test_predictions)\n",
+    "print(\"RMS error on the new data : \", my_rmse_error)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 53,
+   "id": "f5b67812",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "My Predicted Ratings : \n",
+      "\n",
+      "+-------+------+------+----------+\n",
+      "|MovieID|UserID|Rating|prediction|\n",
+      "+-------+------+------+----------+\n",
+      "|   6991|  5000|   5.0|  5.012259|\n",
+      "|  12232|  5000|   3.0| 2.9726129|\n",
+      "|     28|  5000|   5.0| 2.8954036|\n",
+      "|   1100|  5000|   3.0| 2.1100981|\n",
+      "|   4238|  5000|   4.0|  3.812706|\n",
+      "|  15040|  5000|   3.5| 2.8930554|\n",
+      "|    218|  5000|   2.5| 2.7054677|\n",
+      "|      1|  5000|   4.6| 4.5553594|\n",
+      "+-------+------+------+----------+\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(\"My Predicted Ratings : \\n\")  \n",
+    "my_test_predictions.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 54,
+   "id": "cf192cf1",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "                                                                                \r"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+-------+------+---------+--------------------+\n",
+      "|MovieID|UserID|   Rating|               Title|\n",
+      "+-------+------+---------+--------------------+\n",
+      "|   6991|  5000| 5.012259|    A History of God|\n",
+      "|      4|  5000|4.9514775|Paula Abdul's Get...|\n",
+      "|   2756|  5000| 4.798466|         Tenchi Muyo|\n",
+      "|   4918|  5000|4.6848273|Slayers Try DVD C...|\n",
+      "|   8919|  5000| 4.660586|   Cardcaptor Sakura|\n",
+      "|   6619|  5000| 4.568393|Slayers Next DVD ...|\n",
+      "|  10777|  5000| 4.393004|Battle Athletes V...|\n",
+      "|   5484|  5000|4.2430744|Har dil jo Pyar k...|\n",
+      "|   6629|  5000| 4.231745|Legend of the Dra...|\n",
+      "+-------+------+---------+--------------------+\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Generate n Recommendations for all users n = 10\n",
+    "my_recommendations = my_als_model.recommendForAllUsers(10)\n",
+    "my_recommendations = my_recommendations\\\n",
+    "    .withColumn(\"rec_exp\", explode(\"recommendations\"))\\\n",
+    "    .select('UserID', col(\"rec_exp.MovieID\"), col(\"rec_exp.Rating\"))\n",
+    "my_rec_df = my_recommendations.join(movieTitles_df, on='MovieID')\n",
+    "my_rec_df.filter('UserId = '+str(my_user_id)).sort('Rating', ascending=False).limit(10).show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "2808b00e",
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.8.10"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
